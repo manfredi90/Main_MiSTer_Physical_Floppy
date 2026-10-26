@@ -149,6 +149,8 @@ int pfloppy_is_amiga_placeholder(const char *path)
 
 /* ------------------------------------------------------------------ I/O thread */
 
+static void dump_all();
+
 static void clear_tracks()
 {
 	pthread_mutex_lock(&am_lock);
@@ -241,7 +243,7 @@ static void am_probe()
 	switch (r)
 	{
 	case PFD_PROBE_NEW:
-		if (am.present) pf_log("disk changed");
+		if (am.present) { pf_log("disk changed"); dump_all(); }
 		else pf_log("disk inserted");
 		clear_tracks();
 		am.disk_gen++;
@@ -255,6 +257,7 @@ static void am_probe()
 		{
 			pf_log("disk removed");
 			am.present = 0;
+			dump_all();
 			clear_tracks();
 		}
 		if (strcmp(why, am.last_why))
@@ -315,6 +318,7 @@ static void am_read_track(int t, int first)
 	case PFD_CHANGED:
 		pf_log("disk removed (track %d)", t);
 		am.present = 0;
+		dump_all();
 		clear_tracks();
 		break;
 
@@ -395,6 +399,30 @@ static void dump_track(int t)
 	}
 	fclose(f);
 	pf_log("diagnostics: the core stays on track %d, %zu revolution(s) saved in %s", t, revs.size(), name);
+}
+
+// diagnostics: all the revolutions in memory, saved when the disk is removed
+// (to compare with an image of the same disk)
+static void dump_all()
+{
+	FILE *f = fopen("/media/fat/logs/pfloppy_disk.bin", "wb");
+	if (!f) return;
+	int n = 0;
+	for (int t = 0; t < AM_TRACKS; t++)
+	{
+		pthread_mutex_lock(&am_lock);
+		std::vector<am_rev_p> revs = am.tracks[t].revs;
+		pthread_mutex_unlock(&am_lock);
+		for (auto &r : revs)
+		{
+			uint32_t hdr[4] = { (uint32_t)t, r->len, (uint32_t)am.hz, (uint32_t)r->d.size() };
+			fwrite(hdr, 4, 4, f);
+			fwrite(r->d.data(), 2, r->d.size(), f);
+			n++;
+		}
+	}
+	fclose(f);
+	pf_log("diagnostics: %d revolution(s) saved in /media/fat/logs/pfloppy_disk.bin", n);
 }
 
 static void *am_worker(void *)
