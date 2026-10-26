@@ -400,11 +400,11 @@ static void fdd_push_physical(int num)
 
 	if (!m.present)
 	{
-		printf("floppy %c: USB floppy drive, %s\n", 'A' + num, m.drive ? "no disk" : "drive not found");
+		printf("floppy %c: physical floppy drive, %s\n", 'A' + num, m.drive ? "no disk" : "drive not found");
 		return;
 	}
 
-	printf("floppy %c: USB floppy drive, C/H/S %d/%d/%d, %d sectors%s\n", 'A' + num,
+	printf("floppy %c: physical floppy drive, C/H/S %d/%d/%d, %d sectors%s\n", 'A' + num,
 		m.cylinders, m.heads, m.spt, m.total_sectors, m.write_protected ? ", write-protected" : "");
 
 	IOWR(FDD0_BASE + subaddr, 0x0, 1);
@@ -881,7 +881,7 @@ static void fdd_io(uint8_t read)
 			if (sd_params.cnt > 0 && sd_params.cnt <= 16)
 			{
 				if (pfloppy_write(sd_params.lba, (uint8_t*)secbuf, sd_params.cnt) < 0)
-					printf("Error: USB floppy write failed (no disk or write-protected).\n");
+					printf("Error: physical floppy write failed (no disk or write-protected).\n");
 			}
 			else
 			{

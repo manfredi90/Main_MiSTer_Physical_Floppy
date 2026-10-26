@@ -2,12 +2,13 @@
 #define PHYSICAL_FLOPPY_H
 
 /*
- * Physical floppy support: a USB floppy drive (UFI) used live by the
- * x86 family cores (ao486, PCXT, PCAT286) instead of a floppy image.
+ * Physical floppy support: a real floppy drive used live by the x86 family
+ * cores (ao486, PCXT, PCAT286) instead of a floppy image. Two kinds of drive
+ * (pf_drive.h): a USB floppy drive (UFI, SCSI commands through SG_IO) or a
+ * PC drive on a Greaseweazle (flux, decoded in mfm_ibm.cpp).
  *
- * The drive is read with SCSI commands through SG_IO (no page cache,
- * no copy of the whole disk). A background thread keeps a per-track
- * cache with read-ahead and writes changed sectors back to the disk.
+ * No copy of the whole disk: a background thread keeps a per-track cache
+ * with read-ahead and writes changed sectors back to the disk.
  * Requests from the core never block the main loop: a sector that is
  * not in the cache yet is reported as pending and served on a later poll.
  *
