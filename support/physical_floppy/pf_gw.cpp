@@ -25,6 +25,7 @@
 
 #include "pf_drive.h"
 #include "mfm_ibm.h"
+#include "mfm_amiga.h"
 #include "../../cfg.h"
 
 int gw_set_baud(int fd, int baud);
@@ -60,6 +61,7 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int unit_logged = 0;
 	int selected = 0, motor = 0;
 	int double_step = 0;
+	int amiga = 0;           // AmigaDOS disks (11 sectors of 512 bytes per track) instead of PC disks
 	double cell_ns = 1000;
 	int noclick = 1;
 	double rev_ticks = 0;    // measured revolution time (sample ticks)
@@ -90,7 +92,11 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int detect(pfd_geometry *g, char *why, int whysz);
 	int read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs);
 
+	void decode(const std::vector<uint32_t> &flux, std::vector<mfm_sector> &out);
+	int detect_amiga(pfd_geometry *g, char *why, int whysz);
+
 public:
+	GwDrive(int amiga_disks = 0) : amiga(amiga_disks) {}
 	int open(char *desc, int descsz) override;
 	void close() override;
 	int probe(int present, int changed, pfd_geometry *g, char *why, int whysz) override;
@@ -109,6 +115,7 @@ public:
 };
 
 PfDrive *pfd_gw_create() { return new GwDrive(); }
+PfDrive *pfd_gw_create_amiga() { return new GwDrive(1); }
 PfFluxDrive *pfd_gw_flux_create() { return new GwDrive(); }
 
 /* ------------------------------------------------------------------ serial */
@@ -626,7 +633,7 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 		if (r == ACK_NO_INDEX) return PFD_CHANGED; // no rotation: disk removed
 		if (r) continue;                           // overflow etc: read again
 
-		mfm_ibm_decode(flux, freq, cell_ns, out);
+		decode(flux, out);
 		for (auto &s : out)
 		{
 			if (!s.ok || s.n != 2 || s.sec < 1 || s.sec > 63) continue;
@@ -642,6 +649,55 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 	return PFD_OK;
 }
 
+// sectors of a track, as PC sectors: an AmigaDOS sector n (0..10) of track t
+// becomes sector n + 1 of cylinder t / 2, head t % 2
+void GwDrive::decode(const std::vector<uint32_t> &flux, std::vector<mfm_sector> &out)
+{
+	if (!amiga)
+	{
+		mfm_ibm_decode(flux, freq, cell_ns, out);
+		return;
+	}
+	std::vector<amiga_sector> as;
+	mfm_amiga_decode(flux, freq, as);
+	out.clear();
+	for (auto &a : as)
+	{
+		mfm_sector s;
+		s.cyl = a.track >> 1;
+		s.head = a.track & 1;
+		s.sec = a.sec + 1;
+		s.n = 2;
+		s.ok = a.ok;
+		memcpy(s.data, a.data, 512);
+		out.push_back(s);
+	}
+}
+
+int GwDrive::detect_amiga(pfd_geometry *g, char *why, int whysz)
+{
+	std::vector<mfm_sector> secs;
+	double_step = 0;
+	cell_ns = 2000;
+	int r = read_good(0, 0, 2, AMIGA_SPT, secs);
+	if (r == PFD_LOST) { snprintf(why, whysz, "Greaseweazle not responding"); return PFD_PROBE_LOST; }
+	if (r == PFD_NOT_READY || r == PFD_CHANGED) return PFD_PROBE_BUSY;
+	if (r != PFD_OK || secs.size() < AMIGA_SPT / 2)
+	{
+		snprintf(why, whysz, "disk present but no AmigaDOS sectors on track 0 (%zu found): use _GREASEWEAZLE_.adf for other disks", secs.size());
+		return PFD_PROBE_UNREADABLE;
+	}
+
+	int wp = get_pin(28);
+	g->spt = AMIGA_SPT;
+	g->heads = 2;
+	g->cyl = 80;
+	g->total = AMIGA_SPT * 2 * 80;
+	g->wp = (wp == 0);
+	pf_log("format: AmigaDOS, %d of %d sectors found on track 0%s", (int)secs.size(), AMIGA_SPT, wp == 0 ? ", write-protect tab set" : "");
+	return PFD_PROBE_NEW;
+}
+
 static int max_sector(const std::vector<mfm_sector> &secs)
 {
 	int m = 0;
@@ -653,6 +709,8 @@ int GwDrive::detect(pfd_geometry *g, char *why, int whysz)
 {
 	std::vector<uint32_t> flux;
 	std::vector<mfm_sector> secs;
+
+	if (amiga) return detect_amiga(g, why, whysz);
 
 	double_step = 0;
 	if (motor_on() || seek(0) < 0 || head(0) < 0)
@@ -1136,7 +1194,8 @@ int GwDrive::write_track(const pfd_geometry *g, int track, const uint8_t *buf, c
 
 	double rev_ns = rev_ticks > 0 ? rev_ticks * 1e9 / freq : 200e6;
 	std::vector<uint32_t> flux;
-	mfm_ibm_encode_track(cyl, hd, spt, data, cell_ns, freq, rev_ns, flux);
+	if (amiga) mfm_amiga_encode_track(cyl * 2 + hd, data, freq, rev_ns, flux);
+	else mfm_ibm_encode_track(cyl, hd, spt, data, cell_ns, freq, rev_ns, flux);
 
 	for (int attempt = 0; attempt < 2; attempt++)
 	{

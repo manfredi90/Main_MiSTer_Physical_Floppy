@@ -431,6 +431,7 @@ static void fdd_set_physical(int num)
 		config.img_name[old][0] = 0;
 	}
 
+	pfloppy_set_format(PFLOPPY_FORMAT_PC);
 	pfloppy_attach(num);
 	fdd_push_physical(num);
 }

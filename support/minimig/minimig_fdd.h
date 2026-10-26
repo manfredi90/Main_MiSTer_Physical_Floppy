@@ -78,6 +78,7 @@ typedef struct
 	char          name[1024]; /*floppy name*/
 	uint16_t	  lastBit;   /* last mfm word used for clock bit calculation */
 	FluxFile*     fluxFile;  /* flux reader class */
+	unsigned char physical;  /* a real floppy drive in AmigaDOS mode (physical_floppy.h) instead of the file */
 } adfTYPE;
 
 extern unsigned char floppy_zero_supported;

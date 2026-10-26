@@ -38,6 +38,12 @@ void pfloppy_create_placeholder(const char *dir);
 // same, any file name
 void pfloppy_create_placeholder_named(const char *dir, const char *name);
 
+// disk format: PC (x86 cores, default) or AmigaDOS (Minimig, Greaseweazle only).
+// Set before pfloppy_attach.
+#define PFLOPPY_FORMAT_PC    0
+#define PFLOPPY_FORMAT_AMIGA 1
+void pfloppy_set_format(int format);
+
 // use the drive as floppy unit 0 (A:) or 1 (B:). Probes the disk before returning.
 void pfloppy_attach(int unit);
 
@@ -67,6 +73,16 @@ int pfloppy_write(uint32_t lba, const uint8_t *buf, uint32_t cnt);
 #define PFLOPPY_AMIGA_PLACEHOLDER "_GREASEWEAZLE_.adf"
 
 class FluxFile;
+
+// AmigaDOS mode: the drive decoded into sectors and given to the core as an
+// ADF (the core's normal floppy emulation, writable). Standard AmigaDOS disks only.
+#define PFLOPPY_AMIGA_DOS_PLACEHOLDER "_GREASEWEAZLE_DOS_.adf"
+int pfloppy_is_amiga_dos_placeholder(const char *path);
+
+// minimig_fdd.cpp InsertFloppy: use the drive in DFx (index in df[])
+void pfloppy_amiga_dos_insert(int dfx);
+// the DFx drive gets another disk image: stop using the drive
+void pfloppy_amiga_dos_release(int dfx);
 
 // 1 if the path (any folder) points to the Amiga placeholder file
 int pfloppy_is_amiga_placeholder(const char *path);

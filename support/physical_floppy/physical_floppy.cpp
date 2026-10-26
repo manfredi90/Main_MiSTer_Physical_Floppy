@@ -166,15 +166,17 @@ void pf_calc_geometry(int total, int *spt, int *heads, int *cyl)
 /* ------------------------------------------------------------------ drive */
 
 // MiSTer.ini PFLOPPY_DRIVE: 0 = any (Greaseweazle first), 1 = USB floppy drive only, 2 = Greaseweazle only
+static int pf_format = PFLOPPY_FORMAT_PC;
+
 static int open_drive()
 {
 	if (!pf.usb) pf.usb = pfd_usb_create();
-	if (!pf.gw) pf.gw = pfd_gw_create();
+	if (!pf.gw) pf.gw = pf_format == PFLOPPY_FORMAT_AMIGA ? pfd_gw_create_amiga() : pfd_gw_create();
 
 	PfDrive *order[2];
 	int n = 0;
-	if (cfg.pfloppy_drive != 1) order[n++] = pf.gw;
-	if (cfg.pfloppy_drive != 2) order[n++] = pf.usb;
+	if (cfg.pfloppy_drive != 1 || pf_format == PFLOPPY_FORMAT_AMIGA) order[n++] = pf.gw;
+	if (cfg.pfloppy_drive != 2 && pf_format == PFLOPPY_FORMAT_PC) order[n++] = pf.usb; // USB drives can't read Amiga disks
 
 	for (int i = 0; i < n; i++)
 	{
@@ -699,6 +701,16 @@ void pfloppy_create_placeholder_named(const char *dir, const char *name)
 		fclose(f);
 		plog("created %s", path);
 	}
+}
+
+void pfloppy_set_format(int format)
+{
+	if (format == pf_format) return;
+	if (pf.thread_running) pfloppy_detach();
+	if (pf.drv) close_drive("format change");
+	delete pf.gw;
+	pf.gw = NULL;
+	pf_format = format;
 }
 
 void pfloppy_attach(int unit)

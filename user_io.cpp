@@ -1660,6 +1660,7 @@ void user_io_init(const char *path, const char *xml)
 				{
 					printf("Identified Minimig V2 core");
 					pfloppy_create_placeholder_named(HomeDir(), PFLOPPY_AMIGA_PLACEHOLDER);
+					pfloppy_create_placeholder_named(HomeDir(), PFLOPPY_AMIGA_DOS_PLACEHOLDER);
 					BootInit();
 					a2065_start();
 				}

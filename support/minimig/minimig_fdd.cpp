@@ -237,7 +237,7 @@ void ReadTrack(adfTYPE* drive)
 			lba = (drive->track * SECTOR_COUNT) + sector;
 		}
 
-		if (!FileSeekLBA(&drive->file, lba)) return;
+		if (!drive->physical && !FileSeekLBA(&drive->file, lba)) return;
 	}
 
 	EnableFpga();
@@ -254,11 +254,19 @@ void ReadTrack(adfTYPE* drive)
 	int fluxModeCounter = 0;
 	while (fluxModeCounter < 32)
 	{
+		int skip = 0;
 		if (fluxMode) {
 			if (!drive->fluxFile->fluxRead((uint16_t*)&mfm_data, sizeof(mfm_data) / sizeof(uint16_t))) {
 				drive->fluxFile->fluxDummyRead((uint16_t*)&mfm_data, sizeof(mfm_data) / sizeof(uint16_t)); // make ups some data
 			}
 			fluxModeCounter++;
+		} else if (drive->physical) {
+			// real drive: the sector may not be read yet, then the core waits
+			// (as for a real drive) and the sector is sent on a later call.
+			// An unreadable sector is not sent: the Amiga sees a read error.
+			int r = pfloppy_read(drive->track * SECTOR_COUNT + sector, mfm_data.sector_buffer);
+			if (!r) return;
+			skip = r < 0;
 		} else {
 			FileReadSec(&drive->file, mfm_data.sector_buffer);
 		}
@@ -299,7 +307,7 @@ void ReadTrack(adfTYPE* drive)
 				else {
 					//GenerateHeader(sector_header, sector_buffer, sector, track, dsksync);
 					//SendSector(sector_header, sector_buffer);
-					SendSector(mfm_data.sector_buffer, sector, track, (unsigned char)(dsksync >> 8), (unsigned char)dsksync, &drive->lastBit);
+					if (!skip) SendSector(mfm_data.sector_buffer, sector, track, (unsigned char)(dsksync >> 8), (unsigned char)dsksync, &drive->lastBit);
 
 					if (sector == LAST_SECTOR)
 						SendGap(&drive->lastBit);
@@ -327,7 +335,7 @@ void ReadTrack(adfTYPE* drive)
 				// go to the start of current track
 				sector = 0;
 				lba = drive->track * SECTOR_COUNT;
-				if (!FileSeekLBA(&drive->file, lba))
+				if (!drive->physical && !FileSeekLBA(&drive->file, lba))
 				{
 					return;
 				}
@@ -634,14 +642,18 @@ void WriteTrack(adfTYPE* drive)
 		{
 			if (Track == drive->track)
 			{
-				if (!FileSeekLBA(&drive->file, lba + Sector))
+				if (!drive->physical && !FileSeekLBA(&drive->file, lba + Sector))
 				{
 					return;
 				}
 
 				if (GetData())
 				{
-					if (drive->status & DSK_WRITABLE)
+					if ((drive->status & DSK_WRITABLE) && drive->physical)
+					{
+						if (Sector < SECTOR_COUNT) pfloppy_write(lba + Sector, mfm_data.sector_buffer, 1);
+					}
+					else if (drive->status & DSK_WRITABLE)
 					{
 						FileWriteSec(&drive->file, mfm_data.sector_buffer);
 					}
@@ -713,6 +725,18 @@ void HandleFDD(unsigned char c1, unsigned char c2)
 // insert floppy image pointed to to by global <file> into <drive>
 void InsertFloppy(adfTYPE* drive, char* path)
 {
+	if (drive->physical) pfloppy_amiga_dos_release(drive - df);
+	if (pfloppy_is_amiga_dos_placeholder(path)) {
+		// a real floppy drive on a Greaseweazle, AmigaDOS disks decoded into sectors
+		FluxFile* f = drive->fluxFile;
+		drive->fluxFile = NULL;
+		if (f) delete f;
+		FileClose(&drive->file);
+		menu_debugf("Physical floppy (AmigaDOS): \"%s\"\n", path);
+		pfloppy_amiga_dos_insert(drive - df);
+		return;
+	}
+
 	FluxFile* tmpFlux = drive->fluxFile;
 	drive->fluxFile = NULL;
 	if (tmpFlux) delete tmpFlux;

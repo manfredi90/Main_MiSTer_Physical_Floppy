@@ -25,7 +25,7 @@ static uint16_t crc16_ccitt(uint16_t crc, const uint8_t *p, int len)
 
 /* ------------------------------------------------------------------ decode */
 
-static void flux_to_bits(const std::vector<uint32_t> &flux, double freq, double cell_s, std::vector<uint8_t> &bits)
+void mfm_flux_to_bits(const std::vector<uint32_t> &flux, double freq, double cell_s, std::vector<uint8_t> &bits)
 {
 	double clock = cell_s;
 	double cmin = cell_s * (1.0 - PLL_RANGE);
@@ -82,7 +82,7 @@ static int mfm_bytes(const std::vector<uint8_t> &bits, size_t pos, uint8_t *out,
 void mfm_ibm_decode(const std::vector<uint32_t> &flux, double sample_freq, double cell_ns, std::vector<mfm_sector> &out)
 {
 	std::vector<uint8_t> bits;
-	flux_to_bits(flux, sample_freq, cell_ns * 1e-9, bits);
+	mfm_flux_to_bits(flux, sample_freq, cell_ns * 1e-9, bits);
 
 	out.clear();
 

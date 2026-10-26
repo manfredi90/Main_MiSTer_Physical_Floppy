@@ -136,6 +136,10 @@ static struct
 	int df_index;
 } g;
 
+// AmigaDOS mode (below)
+static int dos_df = -1;           // DFx using the drive, -1 none
+static uint16_t dos_my_status;    // drive status set by us
+
 static int now_ms31() { return (int)((long long)pf_now_ms() & 0x7FFFFFFF); }
 static int ms_since(int t) { return (now_ms31() - t) & 0x7FFFFFFF; }
 
@@ -698,6 +702,13 @@ static int am_attach(FluxFile *f)
 		return 0;
 	}
 
+	if (dos_df >= 0)
+	{
+		int o = dos_df;
+		pfloppy_amiga_dos_release(o);
+		df[o].status = 0;
+	}
+
 	pf_log_reset();
 	pf_log("attached to the Amiga floppy (flux, read-only)");
 
@@ -754,8 +765,102 @@ static void am_detach(FluxFile *f)
 	pf_log("detached");
 }
 
+/* ------------------------------------------------------------------ AmigaDOS mode */
+
+// the drive through the sector engine (physical_floppy.cpp), the disk given to
+// the core as an ADF: the core's normal floppy emulation, writable
+
+
+int pfloppy_is_amiga_dos_placeholder(const char *path)
+{
+	if (!path || !path[0]) return 0;
+	const char *p = strrchr(path, '/');
+	p = p ? p + 1 : path;
+	return !strcasecmp(p, PFLOPPY_AMIGA_DOS_PLACEHOLDER);
+}
+
+static uint16_t dos_status()
+{
+	pfloppy_media_t m;
+	pfloppy_get_media(&m);
+	if (!m.present) return 0;
+	return DSK_INSERTED | (m.write_protected ? 0 : DSK_WRITABLE);
+}
+
+void pfloppy_amiga_dos_release(int dfx)
+{
+	if (dfx < 0 || dfx > 3) return;
+	df[dfx].physical = 0;
+	if (dos_df != dfx) return;
+	dos_df = -1;
+	pfloppy_detach();
+}
+
+void pfloppy_amiga_dos_insert(int dfx)
+{
+	if (dfx < 0 || dfx > 3) return;
+	// the flux mode or another DFx had the drive
+	if (am.owner) am.owner->closeFile();
+	if (dos_df >= 0 && dos_df != dfx)
+	{
+		int o = dos_df;
+		pfloppy_amiga_dos_release(o);
+		df[o].status = 0;
+	}
+
+	pfloppy_set_format(PFLOPPY_FORMAT_AMIGA);
+	pfloppy_attach(dfx); // looks at the disk before returning
+	pfloppy_media_event();
+	pf_log("AmigaDOS mode in DF%d (the disk is given to the core as an ADF, writable)", dfx);
+
+	adfTYPE *d = &df[dfx];
+	d->physical = 1;
+	d->tracks = 160;
+	d->ex_status = 0;
+	d->sector_offset = 0;
+	d->lastBit = 0xAAAA;
+	d->track = 0;
+	d->track_prev = -1;
+	snprintf(d->name, sizeof(d->name), "%s", PFLOPPY_AMIGA_DOS_PLACEHOLDER);
+	d->status = dos_status();
+	dos_my_status = d->status;
+	dos_df = dfx;
+}
+
+static void dos_poll()
+{
+	if (dos_df < 0) return;
+	adfTYPE *d = &df[dos_df];
+	if (!d->physical) { dos_df = -1; return; }
+
+	if (d->status != dos_my_status)
+	{
+		// changed from the menu (eject, configuration reset)
+		if (!(d->status & DSK_INSERTED)) pfloppy_amiga_dos_release(dos_df);
+		return;
+	}
+
+	if (pfloppy_media_event() && (d->status & DSK_INSERTED))
+	{
+		// disk removed, changed or inserted: the core sees a removal first
+		d->status = 0;
+		dos_my_status = 0;
+		return;
+	}
+
+	uint16_t st = dos_status();
+	if (st != d->status)
+	{
+		pf_log("core: DF%d %s", dos_df, st ? (st & DSK_WRITABLE ? "disk in" : "disk in, write-protected") : "no disk");
+		d->status = st;
+		d->track_prev = -1;
+	}
+	dos_my_status = d->status;
+}
+
 void pfloppy_amiga_poll(void)
 {
+	dos_poll();
 	if (!am.owner) return;
 
 	int i;

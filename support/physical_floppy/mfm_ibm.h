@@ -22,6 +22,9 @@ struct mfm_sector
 // flux covers more than one revolution; good copies come first per sector).
 void mfm_ibm_decode(const std::vector<uint32_t> &flux, double sample_freq, double cell_ns, std::vector<mfm_sector> &out);
 
+// PLL: flux intervals -> MFM cells (1 = transition), cell_s = nominal bitcell in seconds
+void mfm_flux_to_bits(const std::vector<uint32_t> &flux, double freq, double cell_s, std::vector<uint8_t> &bits);
+
 // guess the bitcell from the flux timing: 1000 (HD), 2000 (DD), 0 (no MFM-like data)
 double mfm_guess_cell_ns(const std::vector<uint32_t> &flux, double sample_freq);
 
