@@ -111,6 +111,98 @@ double pf_now_ms()
 #define now_ms pf_now_ms
 #define plog pf_log
 
+/*
+ * The log is written by its own thread: the callers include the main loop of
+ * MiSTer (requests from the core), which must never wait for the SD card or
+ * the serial console. A Minimig flux drive has only a few milliseconds of
+ * flux buffered in the core: a log line written in place could empty it.
+ */
+static struct
+{
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int started;
+	int busy;
+	char *q[256];        // NULL entry = log reset
+	int head, tail;      // q[head..tail)
+	uint32_t dropped;
+} lg = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, {}, 0, 0, 0 };
+
+static void log_write(const char *line)
+{
+	if (!line)
+	{
+		remove(LOG_PATH);
+		if (!access("/media/fat", F_OK)) mkdir(SD_LOG_DIR, 0755);
+		remove(SD_LOG_PATH);
+		return;
+	}
+	printf("PFLOPPY: %s\n", line + 13);
+	// /tmp, and a copy on the SD card (readable from the network share)
+	const char *paths[2] = { LOG_PATH, SD_LOG_PATH };
+	for (int i = 0; i < 2; i++)
+	{
+		FILE *f = fopen(paths[i], "a");
+		if (f)
+		{
+			fprintf(f, "%s\n", line);
+			fclose(f);
+		}
+	}
+}
+
+static void *log_thread(void *)
+{
+	pthread_mutex_lock(&lg.lock);
+	for (;;)
+	{
+		while (lg.head == lg.tail) pthread_cond_wait(&lg.cond, &lg.lock);
+		char *line = lg.q[lg.head % 256];
+		lg.head++;
+		lg.busy = 1;
+		pthread_mutex_unlock(&lg.lock);
+		log_write(line);
+		free(line);
+		pthread_mutex_lock(&lg.lock);
+		lg.busy = 0;
+		pthread_cond_broadcast(&lg.cond);
+	}
+	return NULL;
+}
+
+static void log_push(char *line)
+{
+	pthread_mutex_lock(&lg.lock);
+	if (!lg.started)
+	{
+		pthread_t t;
+		if (!pthread_create(&t, NULL, log_thread, NULL))
+		{
+			pthread_detach(t);
+			lg.started = 1;
+		}
+	}
+	if (!lg.started)
+	{
+		pthread_mutex_unlock(&lg.lock);
+		log_write(line);
+		free(line);
+		return;
+	}
+	if (lg.tail - lg.head >= 256)
+	{
+		lg.dropped++;
+		free(line);
+	}
+	else
+	{
+		lg.q[lg.tail % 256] = line;
+		lg.tail++;
+		pthread_cond_broadcast(&lg.cond);
+	}
+	pthread_mutex_unlock(&lg.lock);
+}
+
 void pf_log(const char *fmt, ...)
 {
 	char msg[512];
@@ -119,26 +211,23 @@ void pf_log(const char *fmt, ...)
 	vsnprintf(msg, sizeof(msg), fmt, ap);
 	va_end(ap);
 
-	printf("PFLOPPY: %s\n", msg);
-
-	// /tmp, and a copy on the SD card (readable from the network share)
-	const char *paths[2] = { LOG_PATH, SD_LOG_PATH };
-	for (int i = 0; i < 2; i++)
-	{
-		FILE *f = fopen(paths[i], "a");
-		if (f)
-		{
-			fprintf(f, "[%10.3f] %s\n", now_ms() / 1000.0, msg);
-			fclose(f);
-		}
-	}
+	char *line = (char*)malloc(strlen(msg) + 16);
+	if (!line) return;
+	sprintf(line, "[%10.3f] %s", now_ms() / 1000.0, msg);
+	log_push(line);
 }
 
 void pf_log_reset()
 {
-	remove(LOG_PATH);
-	if (!access("/media/fat", F_OK)) mkdir(SD_LOG_DIR, 0755);
-	remove(SD_LOG_PATH);
+	log_push(NULL);
+}
+
+// waits until everything logged so far is written (tests)
+void pf_log_flush()
+{
+	pthread_mutex_lock(&lg.lock);
+	while (lg.started && (lg.head != lg.tail || lg.busy)) pthread_cond_wait(&lg.cond, &lg.lock);
+	pthread_mutex_unlock(&lg.lock);
 }
 
 /* ------------------------------------------------------------------ geometry */

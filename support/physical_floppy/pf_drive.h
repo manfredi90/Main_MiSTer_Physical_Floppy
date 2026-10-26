@@ -111,6 +111,7 @@ void pf_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 double pf_now_ms();
 void pf_calc_geometry(int total, int *spt, int *heads, int *cyl);
 void pf_log_reset();  // new log file (when a drive is attached)
+void pf_log_flush();  // waits until the log is written
 
 #define PF_MOTOR_KEEP_MS 3000  // motor-off delay after the last access from the core
 

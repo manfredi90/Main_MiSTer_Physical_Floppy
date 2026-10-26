@@ -127,9 +127,6 @@ static struct
 
 	// diagnostics
 	uint32_t calls, rewinds, data_bytes, empty_bytes, track_changes;
-	std::vector<uint8_t> cap;   // first flux sent for track 0 (pfloppy_core0.bin)
-	int cap_state;              // 0 waiting, 1 capturing, 2 done
-	int last_cap_n;
 
 	uint16_t my_status;     // drive status set by us
 	uint32_t seen_disk_gen;
@@ -735,8 +732,6 @@ static int am_attach(FluxFile *f)
 	g.seen_disk_gen = am.disk_gen;
 	g.df_index = -1;
 	g.calls = g.rewinds = g.data_bytes = g.empty_bytes = g.track_changes = 0;
-	g.cap.clear();
-	g.cap_state = 0;
 	am.owner = f;
 
 	am.alive = 1;
@@ -969,7 +964,6 @@ public:
 		{
 			memcpy(out, g.rewind.data(), words * 2);
 			g.rewind.clear();
-			capture(out, words);
 			return true;
 		}
 		g.rewind.clear();
@@ -990,7 +984,6 @@ public:
 		uint8_t *b = (uint8_t*)out;
 		if (g.rev) g.data_bytes += words * 2; else g.empty_bytes += words * 2;
 		for (uint32_t i = 0; i < words * 2; i++) b[i] = next_byte();
-		capture(out, words);
 		return true;
 	}
 
@@ -998,36 +991,8 @@ public:
 	{
 		g.rewind.assign(in, in + words);
 		g.rewinds++;
-		// not sent: drop it from the capture
-		if (g.cap_state == 1 && g.last_cap_n && g.cap.size() >= (size_t)g.last_cap_n) g.cap.resize(g.cap.size() - g.last_cap_n);
-		g.last_cap_n = 0;
 	}
 
-	// diagnostics: the first 1.5 s of flux sent for track 0 with data
-	static void capture(const uint16_t *b, uint32_t words)
-	{
-		g.last_cap_n = 0;
-		if (g.cap_state == 0 && g.track == 0 && g.rev) g.cap_state = 1;
-		if (g.cap_state != 1) return;
-		if (g.track != 0) { g.cap_state = 2; save_capture(); return; }
-		const uint8_t *p = (const uint8_t*)b;
-		g.cap.insert(g.cap.end(), p, p + words * 2);
-		g.last_cap_n = words * 2;
-		if (g.cap.size() >= 300000) { g.cap_state = 2; save_capture(); }
-	}
-
-	static void save_capture()
-	{
-		FILE *f = fopen("/media/fat/logs/pfloppy_core0.bin", "wb");
-		if (f)
-		{
-			fwrite(g.cap.data(), 1, g.cap.size(), f);
-			fclose(f);
-		}
-		pf_log("diagnostics: %zu bytes of flux sent for track 0 saved", g.cap.size());
-		g.cap.clear();
-		g.cap.shrink_to_fit();
-	}
 
 	uint32_t firstTrack() override { return 0; }
 	uint32_t lastTrack() override { return AM_TRACKS; }
