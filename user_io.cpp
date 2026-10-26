@@ -36,6 +36,7 @@
 #include "ide_cdrom.h"
 #include "support/minimig/akiko_cd32.h"
 #include "support/minimig/cdtv_cd.h"
+#include "support/physical_floppy/physical_floppy.h"
 #ifdef PROFILING
 #include "profiling.h"
 #endif
@@ -1658,6 +1659,7 @@ void user_io_init(const char *path, const char *xml)
 				else if (is_minimig())
 				{
 					printf("Identified Minimig V2 core");
+					pfloppy_create_placeholder_named(HomeDir(), PFLOPPY_AMIGA_PLACEHOLDER);
 					BootInit();
 					a2065_start();
 				}
@@ -3365,6 +3367,7 @@ void user_io_poll()
 		ide_io(0, sd_req & 7);
 		ide_io(1, (sd_req >> 3) & 7);
 		if (sd_req & 0x0100) ide_cdda_send_sector();
+		pfloppy_amiga_poll();
 		UpdateDriveStatus();
 
 		if (is_minimig() == 2)

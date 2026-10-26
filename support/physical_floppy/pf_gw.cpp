@@ -19,7 +19,9 @@
 #include <dirent.h>
 #include <poll.h>
 #include <termios.h>
+#include <math.h>
 #include <vector>
+#include <algorithm>
 
 #include "pf_drive.h"
 #include "mfm_ibm.h"
@@ -47,7 +49,7 @@ enum { ACK_OKAY = 0, ACK_BAD_COMMAND = 1, ACK_NO_INDEX = 2, ACK_FLUX_OVERFLOW = 
 #define BUS_IBMPC 1
 #define READ_ATTEMPTS 3
 
-class GwDrive : public PfDrive
+class GwDrive : public PfDrive, public PfFluxDrive
 {
 	int fd = -1;
 	char path[64] = "";
@@ -75,7 +77,10 @@ class GwDrive : public PfDrive
 	void motor_off();
 	int seek(int cyl);
 	int head(int h);
-	int read_flux(int revs, std::vector<uint32_t> &flux);
+	int read_flux(int revs, std::vector<uint32_t> &flux, std::vector<uint32_t> *idx_pos = NULL, std::vector<uint32_t> *idx_off = NULL);
+	int read_flux_cmd(uint32_t ticks, uint16_t max_index, std::vector<uint32_t> &flux, std::vector<uint32_t> *idx_pos, std::vector<uint32_t> *idx_off);
+	int splice_rev(const std::vector<uint32_t> &flux, const std::vector<double> &t, double a, pfd_rev &rv);
+	int check_disk(int *was_changed);
 	int find(char *out, int sz);
 	int find_unit();
 	int resync();
@@ -93,9 +98,18 @@ public:
 	int write_track(const pfd_geometry *g, int track, const uint8_t *buf, const uint8_t *dirty, const uint8_t *valid) override;
 	int keep_spinning(const pfd_geometry *g, int track) override;
 	void idle(double idle_ms) override;
+
+	// PfFluxDrive
+	double sample_hz() override { return freq; }
+	int flux_probe(int present, char *why, int whysz) override;
+	int read_revs(int cyl, int head, int revs, std::vector<pfd_rev> &out) override;
+	int flux_seek(int cyl) override;
+	void flux_motor_off() override { motor_off(); }
+	int flux_motor_is_on() override { return motor; }
 };
 
 PfDrive *pfd_gw_create() { return new GwDrive(); }
+PfFluxDrive *pfd_gw_flux_create() { return new GwDrive(); }
 
 /* ------------------------------------------------------------------ serial */
 
@@ -282,11 +296,21 @@ int GwDrive::head(int h)
 }
 
 // reads revs revolutions (plus the part before the first index pulse).
+// idx_pos/idx_off (optional): for every index pulse, the number of flux intervals
+// before it and the ticks from the last flux transition to the pulse.
 // returns the flux status (ACK_*), -1 on a communication error
-int GwDrive::read_flux(int revs, std::vector<uint32_t> &flux)
+int GwDrive::read_flux(int revs, std::vector<uint32_t> &flux, std::vector<uint32_t> *idx_pos, std::vector<uint32_t> *idx_off)
 {
-	uint16_t max_index = revs + 1;
-	uint8_t c[8] = { GW_READ_FLUX, 8, 0, 0, 0, 0, (uint8_t)(max_index & 0xFF), (uint8_t)(max_index >> 8) };
+	return read_flux_cmd(0, revs + 1, flux, idx_pos, idx_off);
+}
+
+// ticks: stop after this many sample ticks, max_index: after this many index pulses (0 = no limit)
+int GwDrive::read_flux_cmd(uint32_t ticks_max, uint16_t max_index, std::vector<uint32_t> &flux, std::vector<uint32_t> *idx_pos, std::vector<uint32_t> *idx_off)
+{
+	if (idx_pos) idx_pos->clear();
+	if (idx_off) idx_off->clear();
+	uint8_t c[8] = { GW_READ_FLUX, 8, (uint8_t)ticks_max, (uint8_t)(ticks_max >> 8), (uint8_t)(ticks_max >> 16), (uint8_t)(ticks_max >> 24),
+		(uint8_t)(max_index & 0xFF), (uint8_t)(max_index >> 8) };
 	int r = cmd(c);
 	if (r) return r;
 
@@ -355,6 +379,8 @@ int GwDrive::read_flux(int revs, std::vector<uint32_t> &flux)
 			{
 				int64_t rev = since_index + ticks + v;
 				if (seen_index && rev > freq * 0.15 && rev < freq * 0.25) rev_ticks = (double)rev;
+				if (idx_pos) idx_pos->push_back(flux.size());
+				if (idx_off) idx_off->push_back(ticks + v);
 				since_index = -(int64_t)(ticks + v);
 				seen_index = 1;
 			}
@@ -732,77 +758,258 @@ int GwDrive::find_unit()
 
 // PC drives: pin 34 = /DISKCHG, low after the disk was removed, cleared by a
 // step pulse when a disk is in. The drive must be selected to read it.
-int GwDrive::probe(int present, int changed, pfd_geometry *g, char *why, int whysz)
+// returns 1 disk in (*was_changed = 1 if the latch was set: removed/changed since
+// the last check), 0 no disk, -1 communication error, -2 no drive connected
+int GwDrive::check_disk(int *was_changed)
 {
+	*was_changed = 0;
 	if (!unit_ok)
 	{
 		int r = find_unit();
-		if (r < 0)
-		{
-			snprintf(why, whysz, "Greaseweazle not responding");
-			return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
-		}
-		if (!r)
-		{
-			snprintf(why, whysz, "no floppy drive connected to the Greaseweazle");
-			return PFD_PROBE_NODISK;
-		}
+		if (r < 0) return -1;
+		if (!r) return -2;
 	}
 
+	if (select(1)) return -1;
+	int chg = get_pin(34);
+	if (chg < 0) return -1;
+	if (chg == 0)
+	{
+		*was_changed = 1;
+		// step to clear the latch: if it stays low there is no disk
+		uint8_t c[2] = { GW_NOCLICK_STEP, 2 };
+		int r = noclick ? cmd(c, 5000) : ACK_BAD_COMMAND;
+		if (r == ACK_BAD_COMMAND)
+		{
+			// old firmware: a real step out and back
+			noclick = 0;
+			seek(1);
+			r = seek(0);
+		}
+		if (r < 0) return -1;
+		chg = get_pin(34);
+		if (chg < 0) return -1;
+	}
+	return chg == 1;
+}
+
+int GwDrive::probe(int present, int changed, pfd_geometry *g, char *why, int whysz)
+{
 	int was_selected = selected;
-	if (select(1))
+	int latch = 0;
+	int in = check_disk(&latch);
+	if (in == -1)
 	{
 		snprintf(why, whysz, "Greaseweazle not responding");
 		return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
+	}
+	if (in == -2)
+	{
+		snprintf(why, whysz, "no floppy drive connected to the Greaseweazle");
+		return PFD_PROBE_NODISK;
 	}
 
 	int res;
-	int chg = get_pin(34);
-	if (chg < 0)
+	if (in && present && !changed && !latch) res = PFD_PROBE_SAME;
+	else if (!in)
+	{
+		snprintf(why, whysz, "no disk");
+		res = PFD_PROBE_NODISK;
+	}
+	else res = detect(g, why, whysz);
+
+	if (!motor && !was_selected) select(0);
+	return res;
+}
+
+int GwDrive::flux_probe(int present, char *why, int whysz)
+{
+	int was_selected = selected;
+	int latch = 0;
+	int in = check_disk(&latch);
+	if (in == -1)
 	{
 		snprintf(why, whysz, "Greaseweazle not responding");
 		return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
 	}
-
-	if (chg == 1 && present && !changed)
+	if (in == -2)
 	{
-		res = PFD_PROBE_SAME;
+		snprintf(why, whysz, "no floppy drive connected to the Greaseweazle");
+		return PFD_PROBE_NODISK;
 	}
-	else
-	{
-		if (chg == 0)
-		{
-			// step to clear the latch: if it stays low there is no disk
-			uint8_t c[2] = { GW_NOCLICK_STEP, 2 };
-			int r = noclick ? cmd(c, 5000) : ACK_BAD_COMMAND;
-			if (r == ACK_BAD_COMMAND)
-			{
-				// old firmware: a real step out and back
-				noclick = 0;
-				seek(1);
-				r = seek(0);
-			}
-			if (r < 0)
-			{
-				snprintf(why, whysz, "Greaseweazle not responding");
-				return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
-			}
-			chg = get_pin(34);
-		}
 
-		if (chg != 1)
-		{
-			snprintf(why, whysz, "no disk");
-			res = PFD_PROBE_NODISK;
-		}
-		else
-		{
-			res = detect(g, why, whysz);
-		}
+	int res;
+	if (!in)
+	{
+		snprintf(why, whysz, "no disk");
+		res = PFD_PROBE_NODISK;
 	}
+	else res = (present && !latch) ? PFD_PROBE_SAME : PFD_PROBE_NEW;
 
 	if (!motor && !was_selected) select(0);
 	return res;
+}
+
+int GwDrive::flux_seek(int cyl)
+{
+	if (select(1)) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	int r = seek(cyl);
+	if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	return r ? PFD_MEDIUM : PFD_OK;
+}
+
+// time of each transition from the start of a capture
+static void flux_times(const std::vector<uint32_t> &flux, std::vector<double> &t)
+{
+	t.resize(flux.size());
+	double acc = 0;
+	for (size_t i = 0; i < flux.size(); i++) { acc += flux[i]; t[i] = acc; }
+}
+
+// time of an index pulse: pos transitions before it in the stream, off ticks after the last of them
+static double index_time(const std::vector<double> &t, uint32_t pos, uint32_t off)
+{
+	return (pos && pos <= t.size() ? t[pos - 1] : 0) + off;
+}
+
+// one revolution from a capture a little longer than a revolution, with one
+// index pulse in it: the part after the pulse is the start of the revolution,
+// the part before it the end. The overlap (the same piece of track seen twice)
+// tells where to join them: the copies are matched on their flux intervals and
+// joined on a transition, so the join is as clean as the rest of the track.
+// Only a piece of flux that matches in one place is used (not a gap or a
+// repeated pattern, where a join a few bits off would lose or add data).
+// returns 0 if no clean join was found
+int GwDrive::splice_rev(const std::vector<uint32_t> &flux, const std::vector<double> &t, double a, pfd_rev &rv)
+{
+	const size_t W = 64;      // intervals compared
+	const int TRIES = 24;     // places tried in the overlap
+	size_t n = flux.size();
+	if (n < 2 * W || rev_ticks <= 0) return 0;
+
+	// first transition after the index pulse (the firmware reports the pulse
+	// in the stream a little late: a few transitions before it may follow it)
+	size_t first = std::upper_bound(t.begin(), t.end(), a) - t.begin();
+	if (!first || first >= n) return 0;
+
+	double R = rev_ticks;
+	double T = t[n - 1];
+	double ov = (T - R < a ? T - R : a) - freq * 0.0002; // overlap before the index pulse
+	if (ov < freq * 0.001) return 0;
+
+	for (int tr = 0; tr < TRIES; tr++)
+	{
+		// a transition in the overlap
+		double tb = ov * (tr + 0.5) / TRIES;
+		size_t j = std::lower_bound(t.begin(), t.end(), tb) - t.begin();
+		if (j + W >= first) break;
+
+		// the same transition one revolution later (within 0.4% of the measured
+		// revolution time: the speed of a drive is stable): the best match, and
+		// the best one at another position
+		double lo = t[j] + R * 0.996, hi = t[j] + R * 1.004;
+		size_t k = std::lower_bound(t.begin(), t.end(), lo) - t.begin();
+		size_t best = 0;
+		double s1 = 1e30, s2 = 1e30;
+		for (; k + W < n && t[k] <= hi; k++)
+		{
+			double sc = 0;
+			for (size_t m = 1; m <= W && sc < s2; m++)
+			{
+				double d = (double)flux[k + m] - (double)flux[j + m];
+				sc += d < 0 ? -d : d;
+			}
+			if (sc < s1)
+			{
+				// the previous best becomes the second if it is somewhere else
+				if (best && fabs(t[k] - t[best]) > freq * 10e-6) s2 = s1;
+				s1 = sc;
+				best = k;
+			}
+			else if (sc < s2 && fabs(t[k] - t[best]) > freq * 10e-6) s2 = sc;
+		}
+
+		// the same flux (mean difference below 0.3 us) and nowhere else
+		if (!best || s1 / W > freq * 0.3e-6 || s2 < s1 * 4 + W * freq * 0.3e-6 || best <= first) continue;
+
+		rv.flux.clear();
+		rv.flux.reserve(n);
+		rv.flux.push_back((uint32_t)lround(t[first] - a > 1 ? t[first] - a : 1));
+		for (size_t i = first + 1; i <= best; i++) rv.flux.push_back(flux[i]);
+		for (size_t i = j + 1; i < first; i++) rv.flux.push_back(flux[i]);
+		rv.len = (uint32_t)lround(t[best] - t[j]);
+		// the revolution time is not updated from here: a measure from index to
+		// index (the reads where this fails) is the reference
+		return 1;
+	}
+	return 0;
+}
+
+int GwDrive::read_revs(int cyl, int hd, int revs, std::vector<pfd_rev> &out)
+{
+	out.clear();
+	if (select(1)) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	int chg = get_pin(34);
+	if (chg < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	if (chg == 0) return PFD_CHANGED;
+
+	if (motor_on()) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	int r = seek(cyl);
+	if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	if (r) return PFD_MEDIUM;
+	if (head(hd) < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+
+	std::vector<uint32_t> flux, pos, off;
+	int have = 0;
+
+	// one revolution: read a little more than a revolution from where the head
+	// is now, without waiting for the index pulse (about 100 ms saved on average)
+	if (revs == 1 && rev_ticks > 0)
+	{
+		r = read_flux_cmd((uint32_t)(rev_ticks * 1.06 + freq * 0.002), 0, flux, &pos, &off);
+		if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+		if (!r)
+		{
+			pfd_rev rv;
+			std::vector<double> t;
+			flux_times(flux, t);
+			if (pos.size() == 1 && splice_rev(flux, t, index_time(t, pos[0], off[0]), rv))
+			{
+				out.push_back(std::move(rv));
+				return PFD_OK;
+			}
+			// two pulses: a whole revolution is in the capture. Otherwise (no clean
+			// join: unformatted or noisy track) a read from index to index
+			have = pos.size() >= 2;
+		}
+	}
+
+	if (!have)
+	{
+		r = read_flux(revs, flux, &pos, &off);
+		if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+		if (r == ACK_NO_INDEX) return PFD_CHANGED; // no rotation: disk removed
+		if (r) return PFD_NOT_READY;               // overflow etc: read again
+	}
+
+	// revolutions: the transitions between two index pulses, by time
+	// (the firmware reports a pulse in the stream a little late)
+	std::vector<double> t;
+	flux_times(flux, t);
+	for (size_t k = 0; k + 1 < pos.size(); k++)
+	{
+		double ia = index_time(t, pos[k], off[k]), ib = index_time(t, pos[k + 1], off[k + 1]);
+		size_t a = std::upper_bound(t.begin(), t.end(), ia) - t.begin();
+		size_t b = std::upper_bound(t.begin(), t.end(), ib) - t.begin();
+		if (a >= b) continue;
+		pfd_rev rv;
+		rv.flux.assign(flux.begin() + a, flux.begin() + b);
+		rv.flux[0] = (uint32_t)lround(t[a] - ia > 1 ? t[a] - ia : 1);
+		rv.len = (uint32_t)lround(ib - ia);
+		if (rv.len > freq * 0.15 && rv.len < freq * 0.25) rev_ticks = rv.len;
+		out.push_back(std::move(rv));
+	}
+	return out.empty() ? PFD_NOT_READY : PFD_OK;
 }
 
 int GwDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t *st)

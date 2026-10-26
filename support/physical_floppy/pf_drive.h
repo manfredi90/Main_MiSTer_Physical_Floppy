@@ -8,6 +8,7 @@
  */
 
 #include <stdint.h>
+#include <vector>
 
 // results of read/write/keep_spinning
 enum
@@ -70,10 +71,45 @@ public:
 PfDrive *pfd_usb_create();
 PfDrive *pfd_gw_create();
 
+// one revolution of a track, from index pulse to index pulse: flux intervals in
+// sample ticks (the first one counted from the index pulse), len = revolution time
+struct pfd_rev
+{
+	std::vector<uint32_t> flux;
+	uint32_t len;
+};
+
+// flux level access to a drive (Greaseweazle), for the Amiga: the computer
+// decodes the disk itself, so no format knowledge is needed here
+class PfFluxDrive
+{
+public:
+	virtual ~PfFluxDrive() {}
+	virtual int open(char *desc, int descsz) = 0;
+	virtual void close() = 0;
+	virtual double sample_hz() = 0;
+
+	// present: a disk is in use now. PFD_PROBE_NEW = a (new) disk is in,
+	// PFD_PROBE_SAME = still the same disk, PFD_PROBE_NODISK, PFD_PROBE_BUSY, PFD_PROBE_LOST
+	virtual int flux_probe(int present, char *why, int whysz) = 0;
+
+	// reads revs revolutions of a track. PFD_OK, PFD_CHANGED (disk removed),
+	// PFD_NOT_READY (try again), PFD_MEDIUM (cylinder out of reach), PFD_LOST
+	virtual int read_revs(int cyl, int head, int revs, std::vector<pfd_rev> &out) = 0;
+
+	// moves the head without reading (follows the computer)
+	virtual int flux_seek(int cyl) = 0;
+	virtual void flux_motor_off() = 0;
+	virtual int flux_motor_is_on() = 0;
+};
+
+PfFluxDrive *pfd_gw_flux_create();
+
 // shared helpers (physical_floppy.cpp)
 void pf_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 double pf_now_ms();
 void pf_calc_geometry(int total, int *spt, int *heads, int *cyl);
+void pf_log_reset();  // new log file (when a drive is attached)
 
 #define PF_MOTOR_KEEP_MS 3000  // motor-off delay after the last access from the core
 

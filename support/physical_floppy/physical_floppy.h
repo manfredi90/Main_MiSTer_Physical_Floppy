@@ -35,6 +35,9 @@ int pfloppy_is_placeholder(const char *path);
 // create the empty placeholder file in the given folder (relative to /media/fat) if missing
 void pfloppy_create_placeholder(const char *dir);
 
+// same, any file name
+void pfloppy_create_placeholder_named(const char *dir, const char *name);
+
 // use the drive as floppy unit 0 (A:) or 1 (B:). Probes the disk before returning.
 void pfloppy_attach(int unit);
 
@@ -54,5 +57,24 @@ int pfloppy_read(uint32_t lba, uint8_t *buf);
 
 // 1 = accepted (written to the disk in the background), -1 = error
 int pfloppy_write(uint32_t lba, const uint8_t *buf, uint32_t cnt);
+
+/*
+ * Amiga (Minimig): the Greaseweazle drive seen by the core as a flux drive
+ * (pf_amiga.cpp). The core decodes the disk itself, so any Amiga disk works,
+ * copy-protected ones included. Read-only: the core's flux drive cannot write.
+ * Selected by inserting PFLOPPY_AMIGA_PLACEHOLDER in a DFx drive.
+ */
+#define PFLOPPY_AMIGA_PLACEHOLDER "_GREASEWEAZLE_.adf"
+
+class FluxFile;
+
+// 1 if the path (any folder) points to the Amiga placeholder file
+int pfloppy_is_amiga_placeholder(const char *path);
+
+// a flux reader for minimig_fdd.cpp (InsertFloppy)
+FluxFile *pfloppy_amiga_create(void);
+
+// called from the Minimig poll loop: reports disk insertions and removals to the core
+void pfloppy_amiga_poll(void);
 
 #endif

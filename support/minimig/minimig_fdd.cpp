@@ -36,6 +36,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../../menu.h"
 #include "scpfile.h"
 #include "ipffile.h"
+#include "../physical_floppy/physical_floppy.h"
 
 unsigned char drives = 0; // number of active drives reported by FPGA (may change only during reset)
 unsigned char floppy_zero_supported = 0;
@@ -720,7 +721,12 @@ void InsertFloppy(adfTYPE* drive, char* path)
 	int writable = FileCanWrite(path);
 	char* fext = strrchr(path, '.');
 
-	if (fext) {
+	if (pfloppy_is_amiga_placeholder(path)) {
+		// a real floppy drive on a Greaseweazle, read live as flux
+		tmpFlux = pfloppy_amiga_create();
+		menu_debugf("Physical floppy: \"%s\"\n", path);
+	}
+	else if (fext) {
 		fext++;
 		char tmp[4] = { 0 };
 		for (uint16_t i = 0; i < 3; i++)
@@ -758,6 +764,7 @@ void InsertFloppy(adfTYPE* drive, char* path)
 		drive->fluxFile = tmpFlux;
 		drive->ex_status = (tmpFlux->fluxMode() == FLUXMODE_DENSITY) ? DSKEX_FLUXDENSITY : 0;
 		drive->status = DSK_INSERTED | DSK_FLUXMODE;
+		pfloppy_amiga_poll(); // a physical drive: the real disk status
 		return;
 	}
 

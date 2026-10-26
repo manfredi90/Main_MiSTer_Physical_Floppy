@@ -134,6 +134,13 @@ void pf_log(const char *fmt, ...)
 	}
 }
 
+void pf_log_reset()
+{
+	remove(LOG_PATH);
+	if (!access("/media/fat", F_OK)) mkdir(SD_LOG_DIR, 0755);
+	remove(SD_LOG_PATH);
+}
+
 /* ------------------------------------------------------------------ geometry */
 
 void pf_calc_geometry(int total, int *spt, int *heads, int *cyl)
@@ -671,6 +678,11 @@ int pfloppy_is_placeholder(const char *path)
 
 void pfloppy_create_placeholder(const char *dir)
 {
+	pfloppy_create_placeholder_named(dir, PFLOPPY_PLACEHOLDER);
+}
+
+void pfloppy_create_placeholder_named(const char *dir, const char *name)
+{
 	char path[1024];
 	struct stat st;
 
@@ -678,7 +690,7 @@ void pfloppy_create_placeholder(const char *dir)
 	if (stat(path, &st) || !S_ISDIR(st.st_mode)) return;
 
 	int l = strlen(path);
-	snprintf(path + l, sizeof(path) - l, "/%s", PFLOPPY_PLACEHOLDER);
+	snprintf(path + l, sizeof(path) - l, "/%s", name);
 	if (!stat(path, &st)) return;
 
 	FILE *f = fopen(path, "wb");
@@ -699,9 +711,7 @@ void pfloppy_attach(int unit)
 
 	if (!pf.data) pf.data = (uint8_t*)malloc(MAX_SECTORS * 512);
 
-	remove(LOG_PATH);
-	if (!access("/media/fat", F_OK)) mkdir(SD_LOG_DIR, 0755);
-	remove(SD_LOG_PATH);
+	pf_log_reset();
 	plog("attached as floppy %c:", 'A' + unit);
 
 	// first look done here, so the BIOS sees a disk inserted before boot
