@@ -27,8 +27,9 @@
 #define LOG_PATH          "/tmp/pfloppy.log"
 #define MAX_SECTORS       5760   // 2.88MB
 #define MAX_SPT           36
-#define MAX_CHUNK         (MAX_SPT * 2) // one cylinder, both heads
-#define READAHEAD_CYLS    1      // cylinders read in advance after the one in use
+#define MAX_CHUNK         MAX_SPT // reads are done one track at a time
+#define READAHEAD_TRACKS  2      // tracks read in advance after the one in use
+#define SLOW_WAIT_MS      800    // log every sector the core waited longer than this
 #define POLL_MS           1000   // disk presence check when idle
 #define RESCAN_MS         2000   // drive search when no drive is open
 #define IO_TIMEOUT_MS     8000   // spin-up + seek + read
@@ -67,9 +68,12 @@ static struct
 
 	int want_lba;
 	double want_t0;
-	int last_chunk;          // cylinder in use (reads are done one cylinder at a time)
+	int last_chunk;          // track in use (reads are done one track at a time)
 	int ra_next;
 	int ra_left;
+	int fill_next;           // background fill of the whole disk: next track to check
+	double fill_t0;
+	int fill_logged;
 
 	uint32_t hits, misses, bad, lost_writes;
 	double worst_wait;
@@ -80,7 +84,7 @@ static struct
 	-1, -1, "",
 	{}, 0, 0, 0,
 	NULL, {}, {}, {}, 0,
-	-1, 0, -1, 0, 0,
+	-1, 0, -1, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, ""
 };
 
@@ -362,6 +366,9 @@ static void reset_cache()
 	pf.dirty_count = 0;
 	pf.ra_left = 0;
 	pf.last_chunk = -1;
+	pf.fill_next = 0;
+	pf.fill_t0 = now_ms();
+	pf.fill_logged = 0;
 	pf.gen++;
 }
 
@@ -493,8 +500,8 @@ static int handle_error(int r, int code, const char *what)
 	return 0;
 }
 
-// reads one cylinder (both heads) in a single command: the drive streams
-// the second track right after the first one without losing a revolution
+// reads one track in a single command. A track (not a whole cylinder) keeps
+// the time a new request from the core may have to wait for the drive short.
 static void read_chunk(int chunk)
 {
 	static uint8_t buf[MAX_CHUNK * 512];
@@ -504,7 +511,7 @@ static void read_chunk(int chunk)
 	uint32_t gen = pf.gen;
 	int spt = pf.media.spt;
 	int heads = pf.media.heads;
-	int size = spt * heads;
+	int size = spt;
 	int first = chunk * size;
 	int n = pf.media.total_sectors - first;
 	pthread_mutex_unlock(&pf.lock);
@@ -531,14 +538,14 @@ static void read_chunk(int chunk)
 			}
 		}
 		pthread_mutex_unlock(&pf.lock);
-		if (dt > 2500) plog("slow read: cylinder %d took %.0f ms", chunk, dt);
+		if (dt > 2500) plog("slow read: track %d took %.0f ms", chunk, dt);
 		return;
 	}
 
 	if (handle_error(r, code, "read failed")) return;
 
 	// medium error: find the bad sectors one by one
-	plog("read error on cylinder %d (sense %X/%02X/%02X), retrying sector by sector", chunk, SK(code), ASC(code), code & 0xFF);
+	plog("read error on track %d (sense %X/%02X/%02X), retrying sector by sector", chunk, SK(code), ASC(code), code & 0xFF);
 	for (int i = 0; i < n; i++)
 	{
 		int s = first + i;
@@ -571,7 +578,7 @@ static void read_chunk(int chunk)
 			}
 		}
 		pthread_mutex_unlock(&pf.lock);
-		if (rr) plog("bad sector %d (C/H/S %d/%d/%d), the core gets zeros", s, s / size, (s / spt) % heads, s % spt + 1);
+		if (rr) plog("bad sector %d (C/H/S %d/%d/%d), the core gets zeros", s, s / (spt * heads), (s / spt) % heads, s % spt + 1);
 	}
 }
 
@@ -696,11 +703,12 @@ static void *worker(void *)
 
 		int chunk = -1;
 		int flush = 0;
+		double fill_done_ms = -1;
 
 		pthread_mutex_lock(&pf.lock);
 		if (pf.media.present)
 		{
-			int size = pf.media.spt * pf.media.heads;
+			int size = pf.media.spt;
 			int chunks = (pf.media.total_sectors + size - 1) / size;
 
 			if (pf.want_lba >= 0 && pf.want_lba < pf.media.total_sectors && pf.state[pf.want_lba] == ST_INVALID)
@@ -723,7 +731,32 @@ static void *worker(void *)
 						if (pf.state[i] == ST_INVALID) { chunk = c; break; }
 					}
 				}
+
+				// nothing else to do: keep filling the cache with the rest of the disk,
+				// so later requests from the core don't have to wait for the drive
+				while (chunk < 0 && pf.fill_next < chunks)
+				{
+					int c = pf.fill_next;
+					for (int i = c * size; i < (c + 1) * size && i < pf.media.total_sectors; i++)
+					{
+						if (pf.state[i] == ST_INVALID) { chunk = c; break; }
+					}
+					if (chunk < 0) pf.fill_next++;
+				}
+
+				if (chunk < 0 && pf.fill_next >= chunks && !pf.fill_logged)
+				{
+					pf.fill_logged = 1;
+					fill_done_ms = now_ms() - pf.fill_t0;
+				}
 			}
+		}
+
+		if (fill_done_ms >= 0)
+		{
+			pthread_mutex_unlock(&pf.lock);
+			plog("whole disk in cache after %.1f s, the drive is used now only for writes and disk change checks", fill_done_ms / 1000);
+			pthread_mutex_lock(&pf.lock);
 		}
 
 		if (chunk < 0 && !flush)
@@ -853,6 +886,8 @@ int pfloppy_media_event(void)
 int pfloppy_read(uint32_t lba, uint8_t *buf)
 {
 	int res;
+	double slow = 0;
+	uint32_t slow_track = 0;
 	pthread_mutex_lock(&pf.lock);
 
 	if (!pf.media.present || (int)lba >= pf.media.total_sectors)
@@ -862,12 +897,12 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 		return -1;
 	}
 
-	int chunk = lba / (pf.media.spt * pf.media.heads);
+	int chunk = lba / pf.media.spt;
 	if (chunk != pf.last_chunk)
 	{
 		pf.last_chunk = chunk;
 		pf.ra_next = chunk + 1;
-		pf.ra_left = READAHEAD_CYLS;
+		pf.ra_left = READAHEAD_TRACKS;
 	}
 
 	uint8_t st = pf.state[lba];
@@ -878,6 +913,7 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 		{
 			double w = now_ms() - pf.want_t0;
 			if (w > pf.worst_wait) pf.worst_wait = w;
+			if (w > SLOW_WAIT_MS) { slow = w; slow_track = lba / pf.media.spt; }
 			pf.want_lba = -1;
 		}
 		else pf.hits++;
@@ -907,6 +943,8 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 
 	pthread_cond_signal(&pf.cond);
 	pthread_mutex_unlock(&pf.lock);
+
+	if (slow > 0) plog("sector %u (track %u) waited %.0f ms for the drive", lba, slow_track, slow);
 	return res;
 }
 
