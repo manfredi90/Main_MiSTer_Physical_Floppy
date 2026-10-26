@@ -33,6 +33,7 @@
 #include "pf_drive.h"
 #include "mfm_ibm.h"
 #include "../minimig/minimig_fdd.h"
+#include "../../menu.h"
 
 #define AM_TRACKS          166     // 83 cylinders, as the core
 #define AM_REVS            3       // revolutions kept per track (weak bits differ between them)
@@ -704,6 +705,13 @@ void pfloppy_amiga_poll(void)
 		g.df_index = i;
 		g.my_status = d->status;
 		pf_log("core: in DF%d, status %X, ex %X, tracks %d", i, d->status, d->ex_status, d->tracks);
+		// the flux drive came with the real floppy drive support of the core
+		// (September 2026), the bit that tells it with the zero drives mode
+		if (!floppy_zero_supported)
+		{
+			pf_log("WARNING: this Minimig core seems too old for flux disks (no virtual flux drive): it needs a core from October 2026 or newer (unstable builds)");
+			Info("Minimig core too old for\nthe Greaseweazle: update it", 6000);
+		}
 	}
 
 	if (d->status != g.my_status)
