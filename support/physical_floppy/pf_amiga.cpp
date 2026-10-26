@@ -3,10 +3,10 @@
  * seen by the core as a flux drive (the same path as .scp/.ipf images,
  * FluxFile in minimig_fdd.h).
  *
- * The drive is read as flux and the flux is passed on as it is: the Amiga
- * decodes the disk itself, so any Amiga disk works, copy-protected ones
- * included (long tracks, timing, weak bits: several revolutions are kept and
- * played in turn).
+ * The drive is read as flux and passed on as MFM cells with their timing (the
+ * density mode of the core, as IPF images): the Amiga decodes the disk
+ * itself, so any Amiga disk works, copy-protected ones included (long tracks,
+ * timing, weak bits: several revolutions are kept and played in turn).
  *
  * A background thread reads the track the core is on (and the other side of
  * the same cylinder), one revolution first, more if the core stays on it.
@@ -47,15 +47,15 @@
 #define AM_READ_FAILS      3       // a track that fails this many times is played empty
 #define AM_SLOW_MS         1000    // log the tracks the core waited longer than this
 #define AM_STATS_MS        10000
-#define AM_EMPTY_REV_S     0.2     // revolution time of a track without data
 
 /* ------------------------------------------------------------------ state */
 
-// one revolution: intervals in sample ticks, 0xFFFF = 65535 ticks without a transition
+// one revolution, as the core's flux drive takes it in density mode (as IPF
+// images): per word, 8 MFM cells (high byte, MSB first, 1 = flux transition)
+// and the length of those cells in core clock ticks minus one (low byte)
 struct am_rev
 {
-	std::vector<uint16_t> d;
-	uint32_t len;
+	std::vector<uint16_t> w;
 };
 typedef std::shared_ptr<const am_rev> am_rev_p;
 
@@ -103,20 +103,9 @@ static struct
 	int track;
 	am_rev_p rev;           // revolution being played, NULL = no data (no transitions)
 	int rev_k;
-	size_t di;              // next interval
-	double cum;             // sample ticks from the index pulse to the last event
-	double rev_start;       // core clock ticks of the index pulse of this revolution
-	double rev_len;         // core clock ticks
-	double ratio;           // core clock ticks per sample tick
-	int64_t pos;            // core clock ticks scheduled so far
-
-	int pending;            // a transition at pulse_at, its byte not written yet
-	int64_t pulse_at;
-	int pb;                 // pulse byte to write (-1 none)
-	int64_t fill_left;      // ticks of delay to write
-	int idx;                // index byte to write
-	int has_b2;
-	uint8_t b2;
+	size_t wi;              // next word of the revolution
+	size_t empty_left;      // words left of a revolution without data
+	int idx;                // the index word comes next
 
 	std::vector<uint16_t> rewind;
 	uint32_t seen_data_gen;
@@ -166,16 +155,82 @@ static void clear_tracks()
 	am.data_gen++;
 }
 
+/*
+ * Flux -> density words: a PLL (as the Greaseweazle tools) gives the MFM
+ * cells and their length; the length of each group of 8 cells becomes the
+ * density of that word. The lengths are scaled so that the revolution keeps
+ * its measured time, and rounded with the error carried on, so the timing of
+ * long stretches (long tracks, Copylock sectors written slower or faster) is
+ * kept. The core's flux drive takes density + 1 ticks per cell.
+ */
+static void flux_to_density(const pfd_rev &rv, double hz, std::vector<uint16_t> &w)
+{
+	const double cell_s = 2e-6;
+	const double PERIOD_ADJ = 0.05, PHASE_ADJ = 0.60, RANGE = 0.10;
+	double clock = cell_s, cmin = cell_s * (1 - RANGE), cmax = cell_s * (1 + RANGE);
+	double ticks = 0;
+
+	std::vector<uint8_t> bits;
+	std::vector<float> len;           // length of each cell (s)
+	bits.reserve(rv.flux.size() * 3);
+	len.reserve(rv.flux.size() * 3);
+
+	for (uint32_t x : rv.flux)
+	{
+		ticks += x / hz;
+		if (ticks < clock / 2) continue;
+		int zeros = 0;
+		for (;;)
+		{
+			ticks -= clock;
+			if (ticks < clock / 2) break;
+			zeros++;
+			bits.push_back(0);
+			len.push_back((float)clock);
+		}
+		bits.push_back(1);
+		len.push_back((float)clock);
+		double nt = ticks * (1.0 - PHASE_ADJ);
+		if (zeros <= 3) clock += ticks * PERIOD_ADJ;
+		else clock += (cell_s - clock) * PERIOD_ADJ;
+		if (clock < cmin) clock = cmin;
+		else if (clock > cmax) clock = cmax;
+		ticks = nt;
+	}
+
+	size_t nbytes = bits.size() / 8;
+	w.clear();
+	if (!nbytes) return;
+
+	double total = 0;
+	for (size_t i = 0; i < nbytes * 8; i++) total += len[i];
+	double scale = (rv.len / hz) / total;
+
+	w.reserve(nbytes);
+	double carry = 0;
+	for (size_t b = 0; b < nbytes; b++)
+	{
+		uint8_t m = 0;
+		double sum = 0;
+		for (int k = 0; k < 8; k++)
+		{
+			m = (m << 1) | bits[b * 8 + k];
+			sum += len[b * 8 + k];
+		}
+		double exact = sum / 8 * scale * FLUX_CLOCK_SPEED_HZ - 1 + carry;
+		long d = lround(exact);
+		if (d < 3) d = 3;
+		if (d > 255) d = 255;
+		carry = exact - d;
+		w.push_back((uint16_t)((m << 8) | d));
+	}
+}
+
 static void store_rev(int t, const pfd_rev &rv)
 {
 	auto r = std::make_shared<am_rev>();
-	r->d.reserve(rv.flux.size() + 16);
-	for (uint32_t v : rv.flux)
-	{
-		while (v >= 0xFFFF) { r->d.push_back(0xFFFF); v -= 0xFFFF; }
-		r->d.push_back((uint16_t)v);
-	}
-	r->len = rv.len;
+	flux_to_density(rv, am.hz, r->w);
+	if (r->w.empty()) return;
 
 	pthread_mutex_lock(&am_lock);
 	am_track &tr = am.tracks[t];
@@ -452,26 +507,19 @@ static void *am_worker(void *)
 /* ------------------------------------------------------------------ flux to the core */
 
 /*
- * The core's flux drive (MiSTerFloppyVirtualFluxDrive.v) reads bytes at
- * FLUX_CLOCK_SPEED_HZ: 0 = index pulse, 1 = one tick of delay, 2 = the next
- * byte is a delay without transition, n >= 3 = a transition now, then n ticks.
- * Bytes 0, 1, 2 take one tick, a transition byte n takes n + 1 ticks.
- * Times are kept absolute, so rounding never accumulates.
+ * Density mode of the core's flux drive (MiSTerFloppyVirtualFluxDrive.v), the
+ * one IPF images use: a word = 8 cells, 0 = index pulse. A word lasts about
+ * 16 us, so the core's buffer (1024 to 2048 words) holds 16 to 32 ms: twice
+ * the margin of the raw flux mode, where a word holds two transitions.
  */
 
-static double empty_rev_len() { return AM_EMPTY_REV_S * FLUX_CLOCK_SPEED_HZ; }
+#define AM_EMPTY_WORD   0x0039   // 8 cells without transitions, 2 us each
+#define AM_EMPTY_WORDS  12500    // a revolution without data (200 ms)
 
-// called with am_lock held
-static void set_ratio_locked()
-{
-	g.ratio = am.hz > 0 ? FLUX_CLOCK_SPEED_HZ / am.hz : 1;
-}
-
-// the next revolution of the current track (or of the same disk position if it has no data)
-static void next_rev(double start)
+// the next revolution of the current track
+static void next_rev()
 {
 	pthread_mutex_lock(&am_lock);
-	set_ratio_locked();
 	am_track &tr = am.tracks[g.track];
 	if (tr.revs.size())
 	{
@@ -481,124 +529,52 @@ static void next_rev(double start)
 	}
 	else g.rev = NULL;
 	pthread_mutex_unlock(&am_lock);
+	g.wi = 0;
+	g.empty_left = AM_EMPTY_WORDS;
+}
 
-	g.rev_start = start;
-	g.di = 0;
-	g.cum = 0;
-	g.rev_len = g.rev ? g.rev->len * g.ratio : empty_rev_len();
+// angle of the disk in the revolution being played (0..1)
+static double play_angle()
+{
+	if (g.rev && g.rev->w.size()) return (double)g.wi / g.rev->w.size();
+	return (double)(AM_EMPTY_WORDS - g.empty_left) / AM_EMPTY_WORDS;
 }
 
 // switches to the data of the current track at the same angle (the disk keeps spinning)
 static void switch_source()
 {
-	double now = (double)g.pos;
-	double frac = g.rev_len > 0 ? (now - g.rev_start) / g.rev_len : 0;
-	frac -= floor(frac);
+	double a = play_angle();
 
 	pthread_mutex_lock(&am_lock);
-	set_ratio_locked();
 	am_track &tr = am.tracks[g.track];
 	g.rev = tr.revs.size() ? tr.revs[0] : NULL;
 	tr.used = pf_now_ms();
 	pthread_mutex_unlock(&am_lock);
 
 	g.rev_k = 0;
-	g.rev_len = g.rev ? g.rev->len * g.ratio : empty_rev_len();
-	g.rev_start = now - frac * g.rev_len;
-	g.di = 0;
-	g.cum = 0;
+	if (g.rev) g.wi = (size_t)(a * g.rev->w.size());
+	g.empty_left = (size_t)((1 - a) * AM_EMPTY_WORDS);
+}
+
+static uint16_t next_word()
+{
+	if (g.idx)
+	{
+		g.idx = 0;
+		return 0;
+	}
 	if (g.rev)
 	{
-		double target = frac * g.rev->len;
-		const std::vector<uint16_t> &d = g.rev->d;
-		while (g.di < d.size())
-		{
-			double nc = g.cum + (d[g.di] == 0xFFFF ? 65535 : d[g.di]);
-			if (nc >= target) break;
-			g.cum = nc;
-			g.di++;
-		}
+		if (g.wi < g.rev->w.size()) return g.rev->w[g.wi++];
 	}
-	g.pending = 0; // the transition in flight belonged to the other track
-}
-
-static void next_event(double *ev, int *is_index)
-{
-	if (g.rev)
+	else if (g.empty_left)
 	{
-		const std::vector<uint16_t> &d = g.rev->d;
-		while (g.di < d.size())
-		{
-			uint16_t v = d[g.di++];
-			if (v == 0xFFFF) { g.cum += 65535; continue; }
-			g.cum += v;
-			*ev = g.rev_start + g.cum * g.ratio;
-			*is_index = 0;
-			return;
-		}
+		g.empty_left--;
+		return AM_EMPTY_WORD;
 	}
-	*ev = g.rev_start + g.rev_len;
-	*is_index = 1;
-	next_rev(*ev);
-}
-
-// schedules the bytes up to the next event
-static void gen_step()
-{
-	double ev;
-	int is_index;
-	next_event(&ev, &is_index);
-	int64_t e = llround(ev);
-
-	if (g.pending)
-	{
-		int64_t n = e - g.pulse_at - 1;
-		if (n < 3) n = 3;
-		if (n > 255) n = 255;
-		g.pb = (int)n;
-		g.pos = g.pulse_at + n + 1;
-		g.pending = 0;
-	}
-	if (e > g.pos)
-	{
-		g.fill_left = e - g.pos;
-		g.pos = e;
-	}
-	if (is_index)
-	{
-		g.idx = 1;
-		g.pos += 1;
-	}
-	else
-	{
-		g.pending = 1;
-		g.pulse_at = g.pos;
-	}
-}
-
-static uint8_t next_byte()
-{
-	for (;;)
-	{
-		if (g.has_b2) { g.has_b2 = 0; return g.b2; }
-		if (g.pb >= 0) { uint8_t b = (uint8_t)g.pb; g.pb = -1; return b; }
-		if (g.fill_left > 0)
-		{
-			if (g.fill_left >= 5)
-			{
-				int64_t d = g.fill_left - 2;
-				if (d > 255) d = 255;
-				g.fill_left -= d + 2;
-				g.b2 = (uint8_t)d;
-				g.has_b2 = 1;
-				return 2;
-			}
-			g.fill_left--;
-			return 1;
-		}
-		if (g.idx) { g.idx = 0; return 0; }
-		gen_step();
-	}
+	// end of the revolution: index pulse, then the next one
+	next_rev();
+	return 0;
 }
 
 static void gen_reset()
@@ -606,17 +582,9 @@ static void gen_reset()
 	g.track = 0;
 	g.rev = NULL;
 	g.rev_k = 0;
-	g.di = 0;
-	g.cum = 0;
-	g.rev_start = 0;
-	g.rev_len = empty_rev_len();
-	g.ratio = 1;
-	g.pos = 0;
-	g.pending = 0;
-	g.pb = -1;
-	g.fill_left = 0;
+	g.wi = 0;
+	g.empty_left = AM_EMPTY_WORDS;
 	g.idx = 0;
-	g.has_b2 = 0;
 	g.rewind.clear();
 	g.seen_data_gen = am.data_gen;
 	g.wait_t0 = 0;
@@ -848,7 +816,7 @@ void pfloppy_amiga_poll(void)
 	if (pres && !ins)
 	{
 		d->status = DSK_INSERTED | DSK_FLUXMODE;
-		d->ex_status = 0;
+		d->ex_status = DSKEX_FLUXDENSITY;
 		pf_log("core: DF%d disk in", i);
 	}
 	else if (!pres && ins)
@@ -871,7 +839,7 @@ public:
 	~AmigaLiveFlux() override { closeFile(); }
 
 	bool fluxReady() override { return am.owner == this && (g.my_status & DSK_INSERTED); }
-	uint8_t fluxMode() override { return FLUXMODE_RAWFLUX; }
+	uint8_t fluxMode() override { return FLUXMODE_DENSITY; }
 
 	bool selectTrack(uint32_t track) override
 	{
@@ -894,8 +862,7 @@ public:
 	bool fluxDummyRead(uint16_t *out, uint32_t words) override
 	{
 		// no transitions
-		uint8_t *b = (uint8_t*)out;
-		for (uint32_t i = 0; i < words * 2; i++) b[i] = 1;
+		for (uint32_t i = 0; i < words; i++) out[i] = AM_EMPTY_WORD;
 		return true;
 	}
 
@@ -926,9 +893,8 @@ public:
 			}
 		}
 
-		uint8_t *b = (uint8_t*)out;
 		if (g.rev) g.data_bytes += words * 2; else g.empty_bytes += words * 2;
-		for (uint32_t i = 0; i < words * 2; i++) b[i] = next_byte();
+		for (uint32_t i = 0; i < words; i++) out[i] = next_word();
 		return true;
 	}
 
