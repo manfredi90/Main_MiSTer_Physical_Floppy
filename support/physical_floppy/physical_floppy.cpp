@@ -23,6 +23,7 @@
 
 #include "physical_floppy.h"
 #include "../../file_io.h"
+#include "../../cfg.h"
 
 #define LOG_PATH          "/tmp/pfloppy.log"
 #define MAX_SECTORS       5760   // 2.88MB
@@ -31,12 +32,17 @@
 #define READAHEAD_TRACKS  2      // tracks read in advance after the one in use
 #define SLOW_WAIT_MS      800    // log every sector the core waited longer than this
 
-// 1 = after a disk is inserted read the whole disk in the background, so every
-// later request is served from the cache. Off: the drive reads only what the
-// core asks for (plus a little read-ahead), like a real floppy drive.
-#ifndef PFLOPPY_BACKGROUND_FILL
-#define PFLOPPY_BACKGROUND_FILL 0
-#endif
+// MiSTer.ini PFLOPPY_PRELOAD=1: after a disk is inserted read the whole disk in
+// the background, so every later request is served from the cache. For cores
+// whose BIOS gives up before a USB drive can spin up. Default off: the drive
+// reads only what the core asks for (plus a little read-ahead), like a real drive.
+#define PFLOPPY_BACKGROUND_FILL (cfg.pfloppy_preload)
+
+// keep the motor spinning this long after the last access from the core,
+// like the motor-off delay of a PC: a burst of accesses doesn't pay a spin-up each time
+#define MOTOR_KEEP_MS     3000
+#define MOTOR_TICK_MS     700    // a USB drive stops its motor after about a second idle
+#define ABANDON_MS        1000   // the core stopped asking for a pending sector
 #define POLL_MS           1000   // disk presence check when idle
 #define RESCAN_MS         2000   // drive search when no drive is open
 #define IO_TIMEOUT_MS     8000   // spin-up + seek + read
@@ -83,6 +89,9 @@ static struct
 	int fill_logged;
 
 	uint32_t hits, misses, bad, lost_writes;
+	double last_call_ms;     // last request from the core
+	double last_access_ms;   // last read/write from the core (motor keep-alive)
+	double last_io_ms;       // last command that moved the drive
 	double worst_wait;
 	double last_stats;
 	char last_scan[256];
@@ -92,7 +101,7 @@ static struct
 	{}, 0, 0, 0,
 	NULL, {}, {}, {}, 0,
 	-1, 0, -1, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, ""
+	0, 0, 0, 0, 0, 0, 0, 0, 0, ""
 };
 
 static double now_ms()
@@ -223,7 +232,9 @@ static int scsi_rw(int write, int lba, int cnt, uint8_t *buf, int *code)
 	cdb[5] = lba & 0xFF;
 	cdb[7] = (cnt >> 8) & 0xFF;
 	cdb[8] = cnt & 0xFF;
-	return sg_exec(cdb, 10, write ? SG_DXFER_TO_DEV : SG_DXFER_FROM_DEV, buf, cnt * 512, IO_TIMEOUT_MS, code);
+	int r = sg_exec(cdb, 10, write ? SG_DXFER_TO_DEV : SG_DXFER_FROM_DEV, buf, cnt * 512, IO_TIMEOUT_MS, code);
+	pf.last_io_ms = now_ms();
+	return r;
 }
 
 /* ------------------------------------------------------------------ drive discovery */
@@ -417,6 +428,10 @@ static void set_media(int total, int wp)
 	pf.media.heads = heads;
 	pf.media.cylinders = cyl;
 	pf.event = 1;
+	// the drive is spinning anyway right after the insertion: read cylinder 0
+	// (boot sector, FAT, root directory) so the first DIR doesn't wait for it
+	pf.ra_next = 0;
+	pf.ra_left = heads;
 	pthread_mutex_unlock(&pf.lock);
 
 	plog("disk inserted: %d sectors (%dK) C/H/S %d/%d/%d%s", total, total / 2, cyl, heads, spt, wp ? " write-protected" : "");
@@ -774,7 +789,30 @@ static void *worker(void *)
 			ts.tv_nsec += 50 * 1000 * 1000;
 			if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
 			pthread_cond_timedwait(&pf.cond, &pf.lock, &ts);
+
+			double t = now_ms();
+			int abandoned = -1;
+			double abandoned_ms = 0;
+			if (pf.want_lba >= 0 && t - pf.last_call_ms > ABANDON_MS)
+			{
+				abandoned = pf.want_lba;
+				abandoned_ms = pf.last_call_ms > pf.want_t0 ? pf.last_call_ms - pf.want_t0 : 0;
+				pf.want_lba = -1;
+			}
+
+			int keep = pf.media.present && pf.last_access_ms > 0 && t - pf.last_access_ms < MOTOR_KEEP_MS && t - pf.last_io_ms > MOTOR_TICK_MS;
+			int keep_lba = pf.last_chunk > 0 ? pf.last_chunk * pf.media.spt : 0;
 			pthread_mutex_unlock(&pf.lock);
+
+			if (abandoned >= 0) plog("the core stopped asking for sector %d, it waited %.0f ms (BIOS/driver timeout?)", abandoned, abandoned_ms);
+			if (keep)
+			{
+				static uint8_t dummy[512];
+				int code;
+				int r = scsi_rw(0, keep_lba, 1, dummy, &code);
+				// this read may be the first to see a disk change: never drop that news
+				if (r) handle_error(r, code, "drive not responding");
+			}
 
 			write_stats();
 			if (now_ms() - last_poll >= POLL_MS)
@@ -904,6 +942,8 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 		return -1;
 	}
 
+	pf.last_call_ms = pf.last_access_ms = now_ms();
+
 	int chunk = lba / pf.media.spt;
 	if (chunk != pf.last_chunk)
 	{
@@ -965,6 +1005,7 @@ int pfloppy_write(uint32_t lba, const uint8_t *buf, uint32_t cnt)
 		return -1;
 	}
 
+	pf.last_access_ms = now_ms();
 	for (uint32_t i = 0; i < cnt; i++)
 	{
 		memcpy(pf.data + (lba + i) * 512, buf + i * 512, 512);
