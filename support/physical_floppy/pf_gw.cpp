@@ -27,6 +27,11 @@
 
 int gw_set_baud(int fd, int baud);
 
+// read() on the serial port (replaceable by the host tests)
+#ifndef PF_GW_READ
+#define PF_GW_READ ::read
+#endif
+
 // commands
 enum
 {
@@ -55,6 +60,9 @@ class GwDrive : public PfDrive
 	double cell_ns = 1000;
 	int noclick = 1;
 	int ro_logged = 0;
+	char err[160] = "";      // last communication error
+	int err_logged = 0;
+	int comm_fails = 0;      // consecutive communication errors
 
 	int wr(const uint8_t *b, int n);
 	int rd(uint8_t *b, int n, int timeout_ms);
@@ -68,6 +76,8 @@ class GwDrive : public PfDrive
 	int read_flux(int revs, std::vector<uint32_t> &flux);
 	int find(char *out, int sz);
 	int find_unit();
+	int resync();
+	int comm_error();
 	int detect(pfd_geometry *g, char *why, int whysz);
 	int read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs);
 
@@ -103,19 +113,42 @@ int GwDrive::wr(const uint8_t *b, int n)
 
 int GwDrive::rd(uint8_t *b, int n, int timeout_ms)
 {
+	double deadline = pf_now_ms() + timeout_ms;
+	int want = n;
 	while (n > 0)
 	{
+		int left = (int)(deadline - pf_now_ms());
+		if (left <= 0)
+		{
+			snprintf(err, sizeof(err), "timeout after %d ms (%d of %d bytes)", timeout_ms, want - n, want);
+			return -1;
+		}
 		struct pollfd p = { fd, POLLIN, 0 };
-		int r = poll(&p, 1, timeout_ms);
-		if (r <= 0) return -1;
-		if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
-		r = read(fd, b, n);
+		int r = poll(&p, 1, left);
+		if (r < 0)
+		{
+			if (errno == EINTR) continue;
+			snprintf(err, sizeof(err), "poll: %s", strerror(errno));
+			return -1;
+		}
+		if (!r) continue;
+		if (p.revents & (POLLERR | POLLHUP | POLLNVAL))
+		{
+			snprintf(err, sizeof(err), "port error (revents %x)", p.revents);
+			return -1;
+		}
+		r = PF_GW_READ(fd, b, n);
 		if (r < 0)
 		{
 			if (errno == EINTR || errno == EAGAIN) continue;
+			snprintf(err, sizeof(err), "read: %s", strerror(errno));
 			return -1;
 		}
-		if (r == 0) return -1;
+		if (r == 0)
+		{
+			usleep(1000); // nothing yet
+			continue;
+		}
 		b += r;
 		n -= r;
 	}
@@ -126,11 +159,59 @@ int GwDrive::rd(uint8_t *b, int n, int timeout_ms)
 int GwDrive::cmd(const uint8_t *c, int timeout_ms)
 {
 	if (fd < 0) return -1;
-	if (wr(c, c[1])) return -1;
+	if (wr(c, c[1]))
+	{
+		snprintf(err, sizeof(err), "command %d: write: %s", c[0], strerror(errno));
+		return -1;
+	}
 	uint8_t ack[2];
-	if (rd(ack, 2, timeout_ms)) return -1;
-	if (ack[0] != c[0]) return -1;
+	if (rd(ack, 2, timeout_ms))
+	{
+		char e[160];
+		snprintf(e, sizeof(e), "command %d: no answer, %s", c[0], err);
+		snprintf(err, sizeof(err), "%s", e);
+		return -1;
+	}
+	if (ack[0] != c[0])
+	{
+		snprintf(err, sizeof(err), "command %d: wrong answer %02X %02X", c[0], ack[0], ack[1]);
+		return -1;
+	}
+	comm_fails = 0;
 	return ack[1];
+}
+
+// resets the communication state of the firmware (10000 baud signal) and checks it answers
+int GwDrive::resync()
+{
+	tcflush(fd, TCIOFLUSH);
+	gw_set_baud(fd, 10000);
+	gw_set_baud(fd, 9600);
+	usleep(20000);
+	tcflush(fd, TCIFLUSH);
+
+	uint8_t info_cmd[3] = { GW_GET_INFO, 3, 0 };
+	uint8_t info[32];
+	if (wr(info_cmd, 3)) return 0;
+	uint8_t ack[2];
+	if (rd(ack, 2, 1000) || ack[0] != GW_GET_INFO || ack[1] || rd(info, 32, 1000)) return 0;
+	return 1;
+}
+
+// a command failed: log it, resynchronise. returns 1 if the Greaseweazle answers again
+// (the operation can be retried), 0 if it is gone
+int GwDrive::comm_error()
+{
+	comm_fails++;
+	if (err_logged < 30)
+	{
+		err_logged++;
+		pf_log("Greaseweazle communication error: %s%s", err, err_logged == 30 ? " (further errors not logged)" : "");
+	}
+	if (comm_fails > 5) return 0;
+	int ok = resync();
+	if (!ok) pf_log("Greaseweazle: no answer after a communication reset");
+	return ok;
 }
 
 int GwDrive::get_pin(int pin)
@@ -207,13 +288,38 @@ int GwDrive::read_flux(int revs, std::vector<uint32_t> &flux)
 	static std::vector<uint8_t> s;
 	s.clear();
 	uint8_t buf[4096];
+	// a zero-length USB packet (sent when a transfer ends on a packet boundary)
+	// wakes poll() but read() returns 0: that is not an error
+	double deadline = pf_now_ms() + 3000;
 	for (;;)
 	{
+		int left = (int)(deadline - pf_now_ms());
+		if (left <= 0)
+		{
+			snprintf(err, sizeof(err), "flux stream stalled (%zu bytes received)", s.size());
+			return -1;
+		}
 		struct pollfd p = { fd, POLLIN, 0 };
-		if (poll(&p, 1, 3000) <= 0) return -1;
-		int n = read(fd, buf, sizeof(buf));
+		int pr = poll(&p, 1, left);
+		if (pr < 0 && errno != EINTR)
+		{
+			snprintf(err, sizeof(err), "flux stream: poll: %s", strerror(errno));
+			return -1;
+		}
+		if (pr <= 0) continue;
+		int n = PF_GW_READ(fd, buf, sizeof(buf));
 		if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-		if (n <= 0) return -1;
+		if (n < 0)
+		{
+			snprintf(err, sizeof(err), "flux stream: read: %s", strerror(errno));
+			return -1;
+		}
+		if (n == 0)
+		{
+			usleep(1000);
+			continue;
+		}
+		deadline = pf_now_ms() + 3000; // data is flowing
 		s.insert(s.end(), buf, buf + n);
 		if (s.back() == 0) break; // end of stream (0 never appears inside it)
 	}
@@ -407,16 +513,16 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 	int ngot = 0;
 
 	secs.clear();
-	if (motor_on()) return PFD_LOST;
+	if (motor_on()) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 	int r = seek(double_step ? cyl * 2 : cyl);
-	if (r < 0) return PFD_LOST;
+	if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 	if (r) return PFD_MEDIUM;
-	if (head(hd) < 0) return PFD_LOST;
+	if (head(hd) < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 
 	for (int attempt = 0; attempt < READ_ATTEMPTS; attempt++)
 	{
 		r = read_flux(1, flux);
-		if (r < 0) return PFD_LOST;
+		if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 		if (r == ACK_NO_INDEX) return PFD_CHANGED; // no rotation: disk removed
 		if (r) continue;                           // overflow etc: read again
 
@@ -452,14 +558,14 @@ int GwDrive::detect(pfd_geometry *g, char *why, int whysz)
 	if (motor_on() || seek(0) < 0 || head(0) < 0)
 	{
 		snprintf(why, whysz, "Greaseweazle not responding");
-		return PFD_PROBE_LOST;
+		return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
 	}
 
 	int r = read_flux(1, flux);
 	if (r < 0)
 	{
 		snprintf(why, whysz, "Greaseweazle not responding");
-		return PFD_PROBE_LOST;
+		return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
 	}
 	if (r == ACK_NO_INDEX) return PFD_PROBE_BUSY; // not spinning yet
 
@@ -473,6 +579,7 @@ int GwDrive::detect(pfd_geometry *g, char *why, int whysz)
 
 	r = read_good(0, 0, 1, 0, secs);
 	if (r == PFD_LOST) { snprintf(why, whysz, "Greaseweazle not responding"); return PFD_PROBE_LOST; }
+	if (r == PFD_NOT_READY || r == PFD_CHANGED) return PFD_PROBE_BUSY;
 	int spt = max_sector(secs);
 	if (!spt || spt > 36 || (int)secs.size() < spt / 2)
 	{
@@ -482,6 +589,7 @@ int GwDrive::detect(pfd_geometry *g, char *why, int whysz)
 
 	r = read_good(0, 1, 2, 0, secs);
 	if (r == PFD_LOST) { snprintf(why, whysz, "Greaseweazle not responding"); return PFD_PROBE_LOST; }
+	if (r == PFD_NOT_READY || r == PFD_CHANGED) return PFD_PROBE_BUSY;
 	int heads = secs.size() ? 2 : 1;
 
 	int cyl = 80;
@@ -564,7 +672,7 @@ int GwDrive::probe(int present, int changed, pfd_geometry *g, char *why, int why
 		if (r < 0)
 		{
 			snprintf(why, whysz, "Greaseweazle not responding");
-			return PFD_PROBE_LOST;
+			return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
 		}
 		if (!r)
 		{
@@ -577,7 +685,7 @@ int GwDrive::probe(int present, int changed, pfd_geometry *g, char *why, int why
 	if (select(1))
 	{
 		snprintf(why, whysz, "Greaseweazle not responding");
-		return PFD_PROBE_LOST;
+		return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
 	}
 
 	int res;
@@ -585,7 +693,7 @@ int GwDrive::probe(int present, int changed, pfd_geometry *g, char *why, int why
 	if (chg < 0)
 	{
 		snprintf(why, whysz, "Greaseweazle not responding");
-		return PFD_PROBE_LOST;
+		return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
 	}
 
 	if (chg == 1 && present && !changed)
@@ -609,7 +717,7 @@ int GwDrive::probe(int present, int changed, pfd_geometry *g, char *why, int why
 			if (r < 0)
 			{
 				snprintf(why, whysz, "Greaseweazle not responding");
-				return PFD_PROBE_LOST;
+				return comm_error() ? PFD_PROBE_BUSY : PFD_PROBE_LOST;
 			}
 			chg = get_pin(34);
 		}
@@ -634,9 +742,9 @@ int GwDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t 
 	int cyl = track / g->heads;
 	int hd = track % g->heads;
 
-	if (select(1)) return PFD_LOST;
+	if (select(1)) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 	int chg = get_pin(34);
-	if (chg < 0) return PFD_LOST;
+	if (chg < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 	if (chg == 0) return PFD_CHANGED;
 
 	std::vector<mfm_sector> secs;
