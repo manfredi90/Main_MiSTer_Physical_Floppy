@@ -24,6 +24,8 @@
 #include "../../cfg.h"
 
 #define LOG_PATH          "/tmp/pfloppy.log"
+#define SD_LOG_DIR        "/media/fat/logs"
+#define SD_LOG_PATH       SD_LOG_DIR "/pfloppy.log"
 #define MAX_SECTORS       5760   // 2.88MB
 #define MAX_SPT           36
 #define MAX_CHUNK         MAX_SPT // reads are done one track at a time
@@ -119,11 +121,16 @@ void pf_log(const char *fmt, ...)
 
 	printf("PFLOPPY: %s\n", msg);
 
-	FILE *f = fopen(LOG_PATH, "a");
-	if (f)
+	// /tmp, and a copy on the SD card (readable from the network share)
+	const char *paths[2] = { LOG_PATH, SD_LOG_PATH };
+	for (int i = 0; i < 2; i++)
 	{
-		fprintf(f, "[%10.3f] %s\n", now_ms() / 1000.0, msg);
-		fclose(f);
+		FILE *f = fopen(paths[i], "a");
+		if (f)
+		{
+			fprintf(f, "[%10.3f] %s\n", now_ms() / 1000.0, msg);
+			fclose(f);
+		}
 	}
 }
 
@@ -669,6 +676,8 @@ void pfloppy_attach(int unit)
 	if (!pf.data) pf.data = (uint8_t*)malloc(MAX_SECTORS * 512);
 
 	remove(LOG_PATH);
+	if (!access("/media/fat", F_OK)) mkdir(SD_LOG_DIR, 0755);
+	remove(SD_LOG_PATH);
 	plog("attached as floppy %c:", 'A' + unit);
 
 	// first look done here, so the BIOS sees a disk inserted before boot

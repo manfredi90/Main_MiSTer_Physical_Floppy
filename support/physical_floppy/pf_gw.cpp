@@ -48,6 +48,8 @@ class GwDrive : public PfDrive
 	char last_scan[256] = "";
 	double freq = 72e6;
 	int unit = 0;
+	int unit_ok = 0;       // a drive answered on 'unit'
+	int unit_logged = 0;
 	int selected = 0, motor = 0;
 	int double_step = 0;
 	double cell_ns = 1000;
@@ -65,6 +67,7 @@ class GwDrive : public PfDrive
 	int head(int h);
 	int read_flux(int revs, std::vector<uint32_t> &flux);
 	int find(char *out, int sz);
+	int find_unit();
 	int detect(pfd_geometry *g, char *why, int whysz);
 	int read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs);
 
@@ -369,13 +372,15 @@ int GwDrive::open(char *desc, int descsz)
 		return 0;
 	}
 
-	// MiSTer.ini PFLOPPY_GW_DRIVE: 0 = drive A (after the cable twist), 1 = drive B
-	unit = cfg.pfloppy_gw_drive ? 1 : 0;
+	// MiSTer.ini PFLOPPY_GW_DRIVE: 0 = automatic, 1 = drive A (after the cable twist), 2 = drive B
+	unit = cfg.pfloppy_gw_drive == 2 ? 1 : 0;
+	unit_ok = 0;
+	unit_logged = 0;
 	selected = motor = 0;
 
 	snprintf(path, sizeof(path), "%s", p);
-	snprintf(desc, descsz, "Greaseweazle model %d.%d firmware %d.%d on %s, drive %c, sample clock %.0f MHz",
-		model, submodel, major, minor, path, 'A' + unit, freq / 1e6);
+	snprintf(desc, descsz, "Greaseweazle model %d.%d firmware %d.%d on %s, sample clock %.0f MHz",
+		model, submodel, major, minor, path, freq / 1e6);
 	return 1;
 }
 
@@ -513,10 +518,61 @@ int GwDrive::detect(pfd_geometry *g, char *why, int whysz)
 	return PFD_PROBE_NEW;
 }
 
+// finds the drive: only a connected drive asserts /TRK0, so a recalibration
+// (seek to cylinder 0) succeeds only on the right unit. Works without a disk.
+// returns 1 found, 0 not found, -1 communication error
+int GwDrive::find_unit()
+{
+	int units[2], n = 0;
+	if (cfg.pfloppy_gw_drive == 1) units[n++] = 0;
+	else if (cfg.pfloppy_gw_drive == 2) units[n++] = 1;
+	else { units[n++] = 0; units[n++] = 1; }
+
+	for (int i = 0; i < n; i++)
+	{
+		motor_off();
+		unit = units[i];
+		if (select(1)) return -1;
+		int r = seek(0);
+		if (r < 0) return -1;
+		if (r == ACK_OKAY)
+		{
+			unit_ok = 1;
+			pf_log("Greaseweazle: floppy drive found as drive %c%s", 'A' + unit,
+				cfg.pfloppy_gw_drive ? "" : " (automatic, MiSTer.ini PFLOPPY_GW_DRIVE=1/2 forces A/B)");
+			return 1;
+		}
+	}
+
+	select(0);
+	if (!unit_logged)
+	{
+		unit_logged = 1;
+		pf_log("Greaseweazle: no floppy drive answers as %s (check cable, power, PFLOPPY_GW_DRIVE)",
+			cfg.pfloppy_gw_drive == 1 ? "drive A" : cfg.pfloppy_gw_drive == 2 ? "drive B" : "drive A or B");
+	}
+	return 0;
+}
+
 // PC drives: pin 34 = /DISKCHG, low after the disk was removed, cleared by a
 // step pulse when a disk is in. The drive must be selected to read it.
 int GwDrive::probe(int present, int changed, pfd_geometry *g, char *why, int whysz)
 {
+	if (!unit_ok)
+	{
+		int r = find_unit();
+		if (r < 0)
+		{
+			snprintf(why, whysz, "Greaseweazle not responding");
+			return PFD_PROBE_LOST;
+		}
+		if (!r)
+		{
+			snprintf(why, whysz, "no floppy drive connected to the Greaseweazle");
+			return PFD_PROBE_NODISK;
+		}
+	}
+
 	int was_selected = selected;
 	if (select(1))
 	{
