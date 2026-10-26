@@ -95,9 +95,6 @@ static struct
 	uint32_t reads, revs_read, cache_hits;
 	double read_ms;
 	double last_read;           // last read from the drive (ms)
-	int dumped0;
-	uint8_t dumped[AM_TRACKS];  // diagnostics: revolutions saved for a track the core kept reading
-	int dumps;
 } am;
 
 // main thread: flux played to the core
@@ -128,6 +125,12 @@ static struct
 	// diagnostics
 	uint32_t calls, rewinds, data_bytes, empty_bytes, track_changes;
 
+	// main loop timing while the core streams flux: the core buffers only
+	// 9 to 18 ms of flux, a longer pause of the main loop empties it
+	double last_poll_ms;
+	uint32_t gaps5, gaps9, gaps16;
+	double gap_max;
+
 	uint16_t my_status;     // drive status set by us
 	uint32_t seen_disk_gen;
 	int df_index;
@@ -149,8 +152,6 @@ int pfloppy_is_amiga_placeholder(const char *path)
 }
 
 /* ------------------------------------------------------------------ I/O thread */
-
-static void dump_all();
 
 static void clear_tracks()
 {
@@ -244,7 +245,7 @@ static void am_probe()
 	switch (r)
 	{
 	case PFD_PROBE_NEW:
-		if (am.present) { pf_log("disk changed"); dump_all(); }
+		if (am.present) pf_log("disk changed");
 		else pf_log("disk inserted");
 		clear_tracks();
 		am.disk_gen++;
@@ -258,7 +259,6 @@ static void am_probe()
 		{
 			pf_log("disk removed");
 			am.present = 0;
-			dump_all();
 			clear_tracks();
 		}
 		if (strcmp(why, am.last_why))
@@ -298,18 +298,6 @@ static void am_read_track(int t, int first)
 	{
 	case PFD_OK:
 		if (first) log_density(revs[0]);
-		if (t == 0 && !am.dumped0)
-		{
-			am.dumped0 = 1;
-			FILE *f = fopen("/media/fat/logs/pfloppy_t0rev.bin", "wb");
-			if (f)
-			{
-				uint32_t hdr[2] = { revs[0].len, (uint32_t)am.hz };
-				fwrite(hdr, 4, 2, f);
-				fwrite(revs[0].flux.data(), 4, revs[0].flux.size(), f);
-				fclose(f);
-			}
-		}
 		store_rev(t, revs[0]);
 		am.reads++;
 		am.revs_read++;
@@ -319,7 +307,6 @@ static void am_read_track(int t, int first)
 	case PFD_CHANGED:
 		pf_log("disk removed (track %d)", t);
 		am.present = 0;
-		dump_all();
 		clear_tracks();
 		break;
 
@@ -374,58 +361,6 @@ static int next_job()
 	return job;
 }
 
-// diagnostics: the core keeps reading the same track (a loader retrying a read
-// that fails?): save its revolutions for analysis
-static void dump_track(int t)
-{
-	pthread_mutex_lock(&am_lock);
-	std::vector<am_rev_p> revs = am.tracks[t].revs;
-	pthread_mutex_unlock(&am_lock);
-	if (revs.empty()) return;
-	am.dumped[t] = 1;
-	am.dumps++;
-	char name[96];
-	snprintf(name, sizeof(name), "/media/fat/logs/pfloppy_t%03d.bin", t);
-	FILE *f = fopen(name, "wb");
-	if (!f) return;
-	for (auto &r : revs)
-	{
-		// per revolution: length, sample clock, number of intervals, intervals
-		std::vector<uint32_t> v;
-		uint32_t acc = 0;
-		for (uint16_t x : r->d) { if (x == 0xFFFF) { acc += 0xFFFF; continue; } v.push_back(acc + x); acc = 0; }
-		uint32_t hdr[3] = { r->len, (uint32_t)am.hz, (uint32_t)v.size() };
-		fwrite(hdr, 4, 3, f);
-		fwrite(v.data(), 4, v.size(), f);
-	}
-	fclose(f);
-	pf_log("diagnostics: the core stays on track %d, %zu revolution(s) saved in %s", t, revs.size(), name);
-}
-
-// diagnostics: all the revolutions in memory, saved when the disk is removed
-// (to compare with an image of the same disk)
-static void dump_all()
-{
-	FILE *f = fopen("/media/fat/logs/pfloppy_disk.bin", "wb");
-	if (!f) return;
-	int n = 0;
-	for (int t = 0; t < AM_TRACKS; t++)
-	{
-		pthread_mutex_lock(&am_lock);
-		std::vector<am_rev_p> revs = am.tracks[t].revs;
-		pthread_mutex_unlock(&am_lock);
-		for (auto &r : revs)
-		{
-			uint32_t hdr[4] = { (uint32_t)t, r->len, (uint32_t)am.hz, (uint32_t)r->d.size() };
-			fwrite(hdr, 4, 4, f);
-			fwrite(r->d.data(), 2, r->d.size(), f);
-			n++;
-		}
-	}
-	fclose(f);
-	pf_log("diagnostics: %d revolution(s) saved in /media/fat/logs/pfloppy_disk.bin", n);
-}
-
 static void *am_worker(void *)
 {
 	double last_poll = 0, last_scan = -1e9, last_stats = pf_now_ms();
@@ -460,9 +395,6 @@ static void *am_worker(void *)
 
 		if (am.present && active)
 		{
-			int w0 = am.want;
-			if (w0 >= 0 && w0 < AM_TRACKS && !am.dumped[w0] && am.dumps < 8 && am.play_t >= 0 && ms_since(am.play_t) > 5000)
-				dump_track(w0);
 
 			int job = next_job();
 			if (job >= 0)
@@ -505,6 +437,8 @@ static void *am_worker(void *)
 			{
 				pf_log("core: %u flux requests (%u given back), %u KB with data, %u KB empty, %u track changes, on track %d",
 					g.calls, g.rewinds, g.data_bytes >> 10, g.empty_bytes >> 10, g.track_changes, g.track);
+				pf_log("main loop pauses while streaming: %u over 5 ms, %u over 9 ms, %u over 16 ms, longest %.1f ms",
+					g.gaps5, g.gaps9, g.gaps16, g.gap_max);
 			}
 		}
 
@@ -718,9 +652,6 @@ static int am_attach(FluxFile *f)
 	am.prefetch0 = 0;
 	am.last_why[0] = 0;
 	am.reads = am.revs_read = am.cache_hits = 0;
-	am.dumped0 = 0;
-	memset(am.dumped, 0, sizeof(am.dumped));
-	am.dumps = 0;
 	am.read_ms = 0;
 	clear_tracks();
 
@@ -732,6 +663,9 @@ static int am_attach(FluxFile *f)
 	g.seen_disk_gen = am.disk_gen;
 	g.df_index = -1;
 	g.calls = g.rewinds = g.data_bytes = g.empty_bytes = g.track_changes = 0;
+	g.last_poll_ms = 0;
+	g.gaps5 = g.gaps9 = g.gaps16 = 0;
+	g.gap_max = 0;
 	am.owner = f;
 
 	am.alive = 1;
@@ -857,6 +791,17 @@ void pfloppy_amiga_poll(void)
 {
 	dos_poll();
 	if (!am.owner) return;
+
+	double t = pf_now_ms();
+	if (g.last_poll_ms > 0 && ms_since(am.last_core) < 50)
+	{
+		double gap = t - g.last_poll_ms;
+		if (gap > 5) g.gaps5++;
+		if (gap > 9) g.gaps9++;
+		if (gap > 16) g.gaps16++;
+		if (gap > g.gap_max) g.gap_max = gap;
+	}
+	g.last_poll_ms = t;
 
 	int i;
 	for (i = 0; i < 4; i++) if (df[i].fluxFile == am.owner) break;
