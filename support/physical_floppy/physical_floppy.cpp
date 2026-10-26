@@ -47,6 +47,8 @@
 #define PENDING_GIVEUP_MS 15000  // answer with zeros if a sector never arrives
 #define STATS_MS          5000
 #define WRITE_RETRIES     3
+#define WRITE_SETTLE_MS   300    // a track being written (the Amiga sends its sectors one by one
+                                 // over a revolution) is written to the disk once complete
 
 enum { ST_INVALID = 0, ST_VALID = 1, ST_BAD = 2 };
 
@@ -75,6 +77,8 @@ static struct
 	uint8_t dirty[MAX_SECTORS];
 	uint8_t wretry[MAX_SECTORS];
 	int dirty_count;
+	int last_write_track;    // track of the last sector written by the core
+	double last_write_ms;
 
 	int want_lba;
 	double want_t0;
@@ -96,7 +100,7 @@ static struct
 	PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0,
 	-1, NULL, NULL, NULL, "", "",
 	{}, {}, 0, 0, 0,
-	NULL, {}, {}, {}, 0,
+	NULL, {}, {}, {}, 0, -1, 0,
 	-1, 0, -1, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
@@ -491,7 +495,27 @@ static void read_chunk(int chunk)
 }
 
 // writes one run of contiguous dirty sectors; returns 1 if something was written
-static int flush_one()
+// first track with changed sectors that can be written now (lock held): not the
+// one the core is still writing, unless it is complete or the core stopped.
+// force: any. returns its first sector, -1 none
+static int flush_pick(int force)
+{
+	int spt = pf.media.spt;
+	int busy = !force && now_ms() - pf.last_write_ms < WRITE_SETTLE_MS ? pf.last_write_track : -1;
+	for (int i = 0; i < pf.media.total_sectors; i++)
+	{
+		if (!pf.dirty[i]) continue;
+		int t = i / spt;
+		if (t != busy) return i;
+		int t0 = t * spt, all = 1;
+		for (int k = t0; k < t0 + spt && k < pf.media.total_sectors; k++) if (!pf.dirty[k]) all = 0;
+		if (all) return i;
+		i = t0 + spt - 1; // skip the rest of that track
+	}
+	return -1;
+}
+
+static int flush_one(int force)
 {
 	static uint8_t buf[MAX_SPT * 512];
 	uint8_t dirty[MAX_SPT] = {}, valid[MAX_SPT] = {};
@@ -503,11 +527,12 @@ static int flush_one()
 		return 0;
 	}
 
-	int first = -1;
-	for (int i = 0; i < pf.media.total_sectors; i++) if (pf.dirty[i]) { first = i; break; }
+	int first = flush_pick(force);
 	if (first < 0)
 	{
-		pf.dirty_count = 0;
+		int any = 0;
+		for (int i = 0; i < pf.media.total_sectors && !any; i++) any = pf.dirty[i];
+		if (!any) pf.dirty_count = 0;
 		pthread_mutex_unlock(&pf.lock);
 		return 0;
 	}
@@ -654,7 +679,7 @@ static void *worker(void *)
 			{
 				chunk = pf.want_lba / size;
 			}
-			else if (pf.dirty_count)
+			else if (pf.dirty_count && flush_pick(0) >= 0)
 			{
 				flush = 1;
 			}
@@ -747,12 +772,12 @@ static void *worker(void *)
 		pthread_mutex_unlock(&pf.lock);
 
 		if (chunk >= 0) read_chunk(chunk);
-		else flush_one();
+		else flush_one(0);
 	}
 
 	// flush pending writes before leaving
 	double t0 = now_ms();
-	while (pf.drv && pf.dirty_count && now_ms() - t0 < 5000) flush_one();
+	while (pf.drv && pf.dirty_count && now_ms() - t0 < 5000) flush_one(1);
 
 	return NULL;
 }
@@ -943,6 +968,8 @@ int pfloppy_write(uint32_t lba, const uint8_t *buf, uint32_t cnt)
 	}
 
 	pf.last_access_ms = now_ms();
+	pf.last_write_ms = pf.last_access_ms;
+	pf.last_write_track = (lba + cnt - 1) / pf.media.spt;
 	for (uint32_t i = 0; i < cnt; i++)
 	{
 		memcpy(pf.data + (lba + i) * 512, buf + i * 512, 512);
