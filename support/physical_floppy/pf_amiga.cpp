@@ -94,6 +94,7 @@ static struct
 	uint32_t reads, revs_read, cache_hits;
 	double read_ms;
 	double last_read;           // last read from the drive (ms)
+	int dumped0;
 } am;
 
 // main thread: flux played to the core
@@ -120,6 +121,12 @@ static struct
 	std::vector<uint16_t> rewind;
 	uint32_t seen_data_gen;
 	double wait_t0;         // the core is on a track without data since
+
+	// diagnostics
+	uint32_t calls, rewinds, data_bytes, empty_bytes, track_changes;
+	std::vector<uint8_t> cap;   // first flux sent for track 0 (pfloppy_core0.bin)
+	int cap_state;              // 0 waiting, 1 capturing, 2 done
+	int last_cap_n;
 
 	uint16_t my_status;     // drive status set by us
 	uint32_t seen_disk_gen;
@@ -284,6 +291,18 @@ static void am_read_track(int t, int first)
 	{
 	case PFD_OK:
 		if (first) log_density(revs[0]);
+		if (t == 0 && !am.dumped0)
+		{
+			am.dumped0 = 1;
+			FILE *f = fopen("/media/fat/logs/pfloppy_t0rev.bin", "wb");
+			if (f)
+			{
+				uint32_t hdr[2] = { revs[0].len, (uint32_t)am.hz };
+				fwrite(hdr, 4, 2, f);
+				fwrite(revs[0].flux.data(), 4, revs[0].flux.size(), f);
+				fclose(f);
+			}
+		}
 		store_rev(t, revs[0]);
 		am.reads++;
 		am.revs_read++;
@@ -417,6 +436,11 @@ static void *am_worker(void *)
 			{
 				logged_reads = am.reads;
 				pf_log("stats: %u track reads, %.0f ms each on average", am.reads, am.reads ? am.read_ms / am.reads : 0.0);
+			}
+			if (g.calls)
+			{
+				pf_log("core: %u flux requests (%u given back), %u KB with data, %u KB empty, %u track changes, on track %d",
+					g.calls, g.rewinds, g.data_bytes >> 10, g.empty_bytes >> 10, g.track_changes, g.track);
 			}
 		}
 
@@ -623,6 +647,7 @@ static int am_attach(FluxFile *f)
 	am.prefetch0 = 0;
 	am.last_why[0] = 0;
 	am.reads = am.revs_read = am.cache_hits = 0;
+	am.dumped0 = 0;
 	am.read_ms = 0;
 	clear_tracks();
 
@@ -633,6 +658,9 @@ static int am_attach(FluxFile *f)
 	g.my_status = 0;
 	g.seen_disk_gen = am.disk_gen;
 	g.df_index = -1;
+	g.calls = g.rewinds = g.data_bytes = g.empty_bytes = g.track_changes = 0;
+	g.cap.clear();
+	g.cap_state = 0;
 	am.owner = f;
 
 	am.alive = 1;
@@ -675,6 +703,7 @@ void pfloppy_amiga_poll(void)
 		// just inserted by InsertFloppy
 		g.df_index = i;
 		g.my_status = d->status;
+		pf_log("core: in DF%d, status %X, ex %X, tracks %d", i, d->status, d->ex_status, d->tracks);
 	}
 
 	if (d->status != g.my_status)
@@ -703,10 +732,12 @@ void pfloppy_amiga_poll(void)
 	{
 		d->status = DSK_INSERTED | DSK_FLUXMODE;
 		d->ex_status = 0;
+		pf_log("core: DF%d disk in", i);
 	}
 	else if (!pres && ins)
 	{
 		d->status = 0;
+		pf_log("core: DF%d no disk", i);
 	}
 	g.my_status = d->status;
 }
@@ -729,6 +760,7 @@ public:
 	{
 		if (track >= AM_TRACKS) track = AM_TRACKS - 1;
 		if ((int)track == g.track) return true;
+		if (++g.track_changes <= 60) pf_log("core: track %d -> %d", g.track, track);
 		am.seq = (int)track == g.track + 1;
 		g.track = track;
 		g.rewind.clear();
@@ -754,11 +786,13 @@ public:
 	{
 		am.last_core = now_ms31();
 		if (am.want != g.track) am.want = g.track;
+		g.calls++;
 
 		if (g.rewind.size() == words)
 		{
 			memcpy(out, g.rewind.data(), words * 2);
 			g.rewind.clear();
+			capture(out, words);
 			return true;
 		}
 		g.rewind.clear();
@@ -777,13 +811,45 @@ public:
 		}
 
 		uint8_t *b = (uint8_t*)out;
+		if (g.rev) g.data_bytes += words * 2; else g.empty_bytes += words * 2;
 		for (uint32_t i = 0; i < words * 2; i++) b[i] = next_byte();
+		capture(out, words);
 		return true;
 	}
 
 	void unFluxRead(const uint16_t *in, uint32_t words) override
 	{
 		g.rewind.assign(in, in + words);
+		g.rewinds++;
+		// not sent: drop it from the capture
+		if (g.cap_state == 1 && g.last_cap_n && g.cap.size() >= (size_t)g.last_cap_n) g.cap.resize(g.cap.size() - g.last_cap_n);
+		g.last_cap_n = 0;
+	}
+
+	// diagnostics: the first 1.5 s of flux sent for track 0 with data
+	static void capture(const uint16_t *b, uint32_t words)
+	{
+		g.last_cap_n = 0;
+		if (g.cap_state == 0 && g.track == 0 && g.rev) g.cap_state = 1;
+		if (g.cap_state != 1) return;
+		if (g.track != 0) { g.cap_state = 2; save_capture(); return; }
+		const uint8_t *p = (const uint8_t*)b;
+		g.cap.insert(g.cap.end(), p, p + words * 2);
+		g.last_cap_n = words * 2;
+		if (g.cap.size() >= 300000) { g.cap_state = 2; save_capture(); }
+	}
+
+	static void save_capture()
+	{
+		FILE *f = fopen("/media/fat/logs/pfloppy_core0.bin", "wb");
+		if (f)
+		{
+			fwrite(g.cap.data(), 1, g.cap.size(), f);
+			fclose(f);
+		}
+		pf_log("diagnostics: %zu bytes of flux sent for track 0 saved", g.cap.size());
+		g.cap.clear();
+		g.cap.shrink_to_fit();
 	}
 
 	uint32_t firstTrack() override { return 0; }
