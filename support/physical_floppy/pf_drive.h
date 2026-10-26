@@ -53,8 +53,9 @@ public:
 	// read one track (track = cyl * heads + head): 512-byte sectors in buf, st[i] = 1 ok, 2 bad
 	virtual int read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t *st) = 0;
 
-	// write n sectors from lba (all within one track)
-	virtual int write_sectors(const pfd_geometry *g, int lba, int n, const uint8_t *buf) = 0;
+	// write the sectors of one track marked in dirty[] (buf holds the whole track,
+	// 512 bytes per sector; valid[] marks the other sectors whose cached copy is in buf too)
+	virtual int write_track(const pfd_geometry *g, int track, const uint8_t *buf, const uint8_t *dirty, const uint8_t *valid) = 0;
 
 	// the core is using the floppy: keep the motor spinning
 	virtual int keep_spinning(const pfd_geometry *g, int track) = 0;

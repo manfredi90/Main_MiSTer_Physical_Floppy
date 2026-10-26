@@ -395,7 +395,8 @@ static void read_chunk(int chunk)
 // writes one run of contiguous dirty sectors; returns 1 if something was written
 static int flush_one()
 {
-	uint8_t buf[MAX_SPT * 512];
+	static uint8_t buf[MAX_SPT * 512];
+	uint8_t dirty[MAX_SPT] = {}, valid[MAX_SPT] = {};
 
 	pthread_mutex_lock(&pf.lock);
 	if (!pf.dirty_count || !pf.media.present)
@@ -413,35 +414,47 @@ static int flush_one()
 		return 0;
 	}
 
+	// all the changed sectors of that track at once (a Greaseweazle rewrites whole tracks)
 	int spt = pf.media.spt;
-	int track_end = (first / spt + 1) * spt;
-	int n = 0;
-	while (first + n < track_end && first + n < pf.media.total_sectors && pf.dirty[first + n])
+	int track = first / spt;
+	int t0 = track * spt;
+	int n = pf.media.total_sectors - t0;
+	if (n > spt) n = spt;
+	int ndirty = 0;
+	for (int i = 0; i < n; i++)
 	{
-		memcpy(buf + n * 512, pf.data + (first + n) * 512, 512);
-		pf.dirty[first + n] = 0;
-		n++;
+		int s = t0 + i;
+		if (pf.state[s] == ST_VALID) memcpy(buf + i * 512, pf.data + s * 512, 512);
+		valid[i] = pf.state[s] == ST_VALID;
+		if (pf.dirty[s])
+		{
+			dirty[i] = 1;
+			pf.dirty[s] = 0;
+			ndirty++;
+		}
 	}
-	pf.dirty_count -= n;
+	pf.dirty_count -= ndirty;
 	uint32_t gen = pf.gen;
+	pfd_geometry g = pf.geom;
 	pthread_mutex_unlock(&pf.lock);
 
-	pfd_geometry g = pf.geom;
-	int r = pf.drv ? pf.drv->write_sectors(&g, first, n, buf) : PFD_LOST;
+	double tw = now_ms();
+	int r = pf.drv ? pf.drv->write_track(&g, track, buf, dirty, valid) : PFD_LOST;
 	pf.last_io_ms = now_ms();
 	if (r == PFD_OK)
 	{
 		pthread_mutex_lock(&pf.lock);
-		pf.written += n;
+		pf.written += ndirty;
 		pthread_mutex_unlock(&pf.lock);
+		plog("wrote %d sector(s) on track %d in %.0f ms", ndirty, track, pf.last_io_ms - tw);
 		return 1;
 	}
 
 	if (r == PFD_WP)
 	{
-		plog("disk is write-protected: %d sectors not written", n);
+		plog("disk is write-protected: %d sectors not written", ndirty);
 		pthread_mutex_lock(&pf.lock);
-		pf.lost_writes += n;
+		pf.lost_writes += ndirty;
 		if (!pf.media.write_protected) { pf.media.write_protected = 1; pf.event = 1; }
 		pthread_mutex_unlock(&pf.lock);
 		return 1;
@@ -449,9 +462,19 @@ static int flush_one()
 
 	if (handle_result(r, "write failed"))
 	{
-		plog("%d sectors not written (disk removed?)", n);
+		// a lost drive/disk change is final; a busy drive (communication reset) is retried
+		if (r == PFD_NOT_READY)
+		{
+			pthread_mutex_lock(&pf.lock);
+			if (gen == pf.gen)
+				for (int i = 0; i < n; i++)
+					if (dirty[i] && !pf.dirty[t0 + i]) { pf.dirty[t0 + i] = 1; pf.dirty_count++; }
+			pthread_mutex_unlock(&pf.lock);
+			return 1;
+		}
+		plog("%d sectors not written (disk removed?)", ndirty);
 		pthread_mutex_lock(&pf.lock);
-		pf.lost_writes += n;
+		pf.lost_writes += ndirty;
 		pthread_mutex_unlock(&pf.lock);
 		return 1;
 	}
@@ -463,7 +486,8 @@ static int flush_one()
 	{
 		for (int i = 0; i < n; i++)
 		{
-			int s = first + i;
+			if (!dirty[i]) continue;
+			int s = t0 + i;
 			if (pf.dirty[s]) continue; // written again meanwhile
 			if (++pf.wretry[s] < WRITE_RETRIES) { pf.dirty[s] = 1; pf.dirty_count++; }
 			else { pf.wretry[s] = 0; dropped++; }
@@ -471,7 +495,7 @@ static int flush_one()
 		pf.lost_writes += dropped;
 	}
 	pthread_mutex_unlock(&pf.lock);
-	plog("write error at sector %d%s", first, dropped ? ", sectors dropped" : ", will retry");
+	plog("write error on track %d%s", track, dropped ? ", sectors dropped" : ", will retry");
 	return 1;
 }
 

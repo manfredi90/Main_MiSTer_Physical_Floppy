@@ -26,6 +26,7 @@
 #include "../../cfg.h"
 
 int gw_set_baud(int fd, int baud);
+int gw_read_sys(const char *path, char *out, int sz);
 
 // read() on the serial port (replaceable by the host tests)
 #ifndef PF_GW_READ
@@ -35,13 +36,13 @@ int gw_set_baud(int fd, int baud);
 // commands
 enum
 {
-	GW_GET_INFO = 0, GW_SEEK = 2, GW_HEAD = 3, GW_MOTOR = 6, GW_READ_FLUX = 7,
+	GW_GET_INFO = 0, GW_SEEK = 2, GW_HEAD = 3, GW_MOTOR = 6, GW_READ_FLUX = 7, GW_WRITE_FLUX = 8,
 	GW_GET_FLUX_STATUS = 9, GW_SELECT = 12, GW_DESELECT = 13, GW_SET_BUS_TYPE = 14,
 	GW_RESET = 16, GW_GET_PIN = 20, GW_NOCLICK_STEP = 22
 };
 
 // acks
-enum { ACK_OKAY = 0, ACK_BAD_COMMAND = 1, ACK_NO_INDEX = 2, ACK_FLUX_OVERFLOW = 4, ACK_BAD_CYLINDER = 11 };
+enum { ACK_OKAY = 0, ACK_BAD_COMMAND = 1, ACK_NO_INDEX = 2, ACK_FLUX_OVERFLOW = 4, ACK_FLUX_UNDERFLOW = 5, ACK_WRPROT = 6, ACK_BAD_CYLINDER = 11 };
 
 #define BUS_IBMPC 1
 #define READ_ATTEMPTS 3
@@ -59,7 +60,8 @@ class GwDrive : public PfDrive
 	int double_step = 0;
 	double cell_ns = 1000;
 	int noclick = 1;
-	int ro_logged = 0;
+	double rev_ticks = 0;    // measured revolution time (sample ticks)
+	double last_users_check = -1e9;
 	char err[160] = "";      // last communication error
 	int err_logged = 0;
 	int comm_fails = 0;      // consecutive communication errors
@@ -78,6 +80,8 @@ class GwDrive : public PfDrive
 	int find_unit();
 	int resync();
 	int comm_error();
+	int write_flux(const std::vector<uint32_t> &flux);
+	void check_port_users(int always);
 	int detect(pfd_geometry *g, char *why, int whysz);
 	int read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs);
 
@@ -86,7 +90,7 @@ public:
 	void close() override;
 	int probe(int present, int changed, pfd_geometry *g, char *why, int whysz) override;
 	int read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t *st) override;
-	int write_sectors(const pfd_geometry *g, int lba, int n, const uint8_t *buf) override;
+	int write_track(const pfd_geometry *g, int track, const uint8_t *buf, const uint8_t *dirty, const uint8_t *valid) override;
 	int keep_spinning(const pfd_geometry *g, int track) override;
 	void idle(double idle_ms) override;
 };
@@ -208,6 +212,7 @@ int GwDrive::comm_error()
 		err_logged++;
 		pf_log("Greaseweazle communication error: %s%s", err, err_logged == 30 ? " (further errors not logged)" : "");
 	}
+	if (strstr(err, "wrong answer") || strstr(err, "no answer")) check_port_users(0);
 	if (comm_fails > 5) return 0;
 	int ok = resync();
 	if (!ok) pf_log("Greaseweazle: no answer after a communication reset");
@@ -329,9 +334,12 @@ int GwDrive::read_flux(int revs, std::vector<uint32_t> &flux)
 	if (r < 0) return -1;
 
 	// decode the stream into flux intervals
+	// (index markers give the revolution time, used to size written tracks)
 	flux.clear();
 	flux.reserve(s.size());
 	uint32_t ticks = 0;
+	int64_t since_index = 0;
+	int seen_index = 0;
 	size_t i = 0, n = s.size() - 1;
 	while (i < n)
 	{
@@ -342,17 +350,27 @@ int GwDrive::read_flux(int revs, std::vector<uint32_t> &flux)
 			uint8_t op = s[i++];
 			uint32_t v = ((s[i] & 254) >> 1) | ((s[i + 1] & 254) << 6) | ((s[i + 2] & 254) << 13) | ((uint32_t)(s[i + 3] & 254) << 20);
 			i += 4;
-			if (op == 2) ticks += v; // space; 1 = index (only the flux matters here)
+			if (op == 2) ticks += v; // space
+			else if (op == 1)        // index
+			{
+				int64_t rev = since_index + ticks + v;
+				if (seen_index && rev > freq * 0.15 && rev < freq * 0.25) rev_ticks = (double)rev;
+				since_index = -(int64_t)(ticks + v);
+				seen_index = 1;
+			}
 		}
 		else if (b < 250)
 		{
 			flux.push_back(ticks + b);
+			since_index += ticks + b;
 			ticks = 0;
 		}
 		else
 		{
 			if (i >= n) break;
-			flux.push_back(ticks + 250 + (b - 250) * 255 + s[i++] - 1);
+			uint32_t v = ticks + 250 + (b - 250) * 255 + s[i++] - 1;
+			flux.push_back(v);
+			since_index += v;
 			ticks = 0;
 		}
 	}
@@ -361,7 +379,62 @@ int GwDrive::read_flux(int revs, std::vector<uint32_t> &flux)
 
 /* ------------------------------------------------------------------ discovery */
 
-static int gw_read_sys(const char *path, char *out, int sz)
+// other programs that have the Greaseweazle port open (e.g. a service probing
+// serial ports for NFC readers) send it data and steal its answers: tell the user
+void GwDrive::check_port_users(int always)
+{
+	if (!always && pf_now_ms() - last_users_check < 30000) return;
+	last_users_check = pf_now_ms();
+
+	char port[PATH_MAX];
+	if (!realpath(path, port)) snprintf(port, sizeof(port), "%s", path);
+
+	char list[256] = "";
+	int zaparoo = 0;
+	DIR *d = opendir("/proc");
+	if (!d) return;
+	struct dirent *de;
+	while ((de = readdir(d)))
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= 0 || pid == getpid()) continue;
+
+		char p[64];
+		snprintf(p, sizeof(p), "/proc/%d/fd", pid);
+		DIR *fdd = opendir(p);
+		if (!fdd) continue;
+
+		int found = 0;
+		struct dirent *fe;
+		while (!found && (fe = readdir(fdd)))
+		{
+			char lp[96], target[PATH_MAX];
+			snprintf(lp, sizeof(lp), "/proc/%d/fd/%s", pid, fe->d_name);
+			ssize_t n = readlink(lp, target, sizeof(target) - 1);
+			if (n <= 0) continue;
+			target[n] = 0;
+			if (!strcmp(target, port)) found = 1;
+		}
+		closedir(fdd);
+		if (!found) continue;
+
+		char comm[64] = "?";
+		snprintf(p, sizeof(p), "/proc/%d/comm", pid);
+		gw_read_sys(p, comm, sizeof(comm));
+		if (strcasestr(comm, "zaparoo")) zaparoo = 1;
+		int l = strlen(list);
+		snprintf(list + l, sizeof(list) - l, "%s%s (pid %d)", l ? ", " : "", comm, pid);
+	}
+	closedir(d);
+
+	if (list[0])
+	{
+		pf_log("WARNING: the Greaseweazle port %s is also open by: %s. A program probing serial ports sends data to the Greaseweazle and breaks the communication.%s",
+			path, list, zaparoo ? " For Zaparoo, add to zaparoo/config.toml: [readers.drivers.pn532] auto_detect = false, and [readers.drivers.tty2oled] auto_detect = false" : "");
+	}
+}
+
+int gw_read_sys(const char *path, char *out, int sz)
 {
 	out[0] = 0;
 	FILE *f = fopen(path, "r");
@@ -485,6 +558,7 @@ int GwDrive::open(char *desc, int descsz)
 	selected = motor = 0;
 
 	snprintf(path, sizeof(path), "%s", p);
+	check_port_users(1);
 	snprintf(desc, descsz, "Greaseweazle model %d.%d firmware %d.%d on %s, sample clock %.0f MHz",
 		model, submodel, major, minor, path, freq / 1e6);
 	return 1;
@@ -614,13 +688,7 @@ int GwDrive::detect(pfd_geometry *g, char *why, int whysz)
 	g->heads = heads;
 	g->cyl = cyl;
 	g->total = spt * heads * cyl;
-	g->wp = 1; // read-only for now (writing needs the MFM track encoder on the drive)
-
-	if (!ro_logged)
-	{
-		ro_logged = 1;
-		pf_log("Greaseweazle: reading only for now, the disk is shown to the core as write-protected");
-	}
+	g->wp = (wp == 0);
 	pf_log("format: %s, %d sectors/track, %d head(s), %d cylinders%s%s", cell == 1000 ? "HD 500 kbps" : "DD 250 kbps",
 		spt, heads, cyl, double_step ? " (double step)" : "", wp == 0 ? ", write-protect tab set" : "");
 	return PFD_PROBE_NEW;
@@ -762,10 +830,132 @@ int GwDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t 
 	return PFD_OK;
 }
 
-int GwDrive::write_sectors(const pfd_geometry *g, int lba, int n, const uint8_t *buf)
+// writes a flux stream on the current track, from index to index.
+// returns ACK_* (ACK_WRPROT write-protected), -1 on a communication error
+int GwDrive::write_flux(const std::vector<uint32_t> &flux)
 {
-	(void)g; (void)lba; (void)n; (void)buf;
-	return PFD_WP;
+	uint8_t c[4] = { GW_WRITE_FLUX, 4, 1, 1 }; // cue at index, terminate at index
+	int r = cmd(c);
+	if (r) return r;
+
+	// encoding as the Greaseweazle host tools: 1-249 one byte, 250-1524 two bytes,
+	// longer: "space" op + 249; a final dummy flux makes sure the last real one is written
+	static std::vector<uint8_t> o;
+	o.clear();
+	o.reserve(flux.size() + 16);
+	auto put28 = [](std::vector<uint8_t> &v, uint32_t x)
+	{
+		v.push_back(1 | ((x << 1) & 255)); v.push_back(1 | ((x >> 6) & 255));
+		v.push_back(1 | ((x >> 13) & 255)); v.push_back(1 | ((x >> 20) & 255));
+	};
+	auto put = [&](uint32_t v)
+	{
+		if (!v) return;
+		if (v < 250) o.push_back(v);
+		else if (v <= 1524) { o.push_back(250 + (v - 250) / 255); o.push_back(1 + (v - 250) % 255); }
+		else { o.push_back(255); o.push_back(2); put28(o, v - 249); o.push_back(249); }
+	};
+	for (uint32_t v : flux) put(v);
+	put((uint32_t)(100e-6 * freq));
+	o.push_back(0);
+
+	if (wr(o.data(), o.size()))
+	{
+		snprintf(err, sizeof(err), "write flux: %s", strerror(errno));
+		return -1;
+	}
+
+	uint8_t sync;
+	if (rd(&sync, 1, 3000))
+	{
+		char e[160];
+		snprintf(e, sizeof(e), "write flux: no end of write, %s", err);
+		snprintf(err, sizeof(err), "%s", e);
+		return -1;
+	}
+
+	uint8_t st[2] = { GW_GET_FLUX_STATUS, 2 };
+	return cmd(st);
+}
+
+// rewrites a whole track: the sectors not changed come from the cache or are read
+// from the disk first; the track is read back to check the written data
+int GwDrive::write_track(const pfd_geometry *g, int track, const uint8_t *buf, const uint8_t *dirty, const uint8_t *valid)
+{
+	int cyl = track / g->heads;
+	int hd = track % g->heads;
+	int spt = g->spt;
+
+	if (select(1)) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	int chg = get_pin(34);
+	if (chg < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	if (chg == 0) return PFD_CHANGED;
+	int wp = get_pin(28);
+	if (wp < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	if (wp == 0) return PFD_WP;
+
+	static uint8_t data[64 * 512];
+	uint8_t have[64] = {};
+	int missing = 0;
+	for (int i = 0; i < spt; i++)
+	{
+		if (dirty[i] || valid[i])
+		{
+			memcpy(data + i * 512, buf + i * 512, 512);
+			have[i] = 1;
+		}
+		else missing++;
+	}
+
+	std::vector<mfm_sector> secs;
+	if (missing)
+	{
+		int r = read_good(cyl, hd, g->heads, spt, secs);
+		if (r != PFD_OK) return r;
+		for (auto &s : secs)
+		{
+			int i = s.sec - 1;
+			if (i < 0 || i >= spt || have[i]) continue;
+			memcpy(data + i * 512, s.data, 512);
+			have[i] = 1;
+			missing--;
+		}
+		if (missing)
+		{
+			pf_log("track %d: %d sector(s) unreadable, the track is not rewritten (it would lose them)", track, missing);
+			return PFD_MEDIUM;
+		}
+	}
+
+	double rev_ns = rev_ticks > 0 ? rev_ticks * 1e9 / freq : 200e6;
+	std::vector<uint32_t> flux;
+	mfm_ibm_encode_track(cyl, hd, spt, data, cell_ns, freq, rev_ns, flux);
+
+	for (int attempt = 0; attempt < 2; attempt++)
+	{
+		if (motor_on()) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+		int r = seek(double_step ? cyl * 2 : cyl);
+		if (r < 0 || head(hd) < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+
+		r = write_flux(flux);
+		if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+		if (r == ACK_WRPROT) return PFD_WP;
+		if (r == ACK_NO_INDEX) return PFD_CHANGED;
+		if (r) { pf_log("track %d: write status %d, retrying", track, r); continue; }
+
+		// verify
+		r = read_good(cyl, hd, g->heads, spt, secs);
+		if (r != PFD_OK) return r;
+		int ok = 0;
+		for (auto &s : secs)
+		{
+			int i = s.sec - 1;
+			if (i >= 0 && i < spt && !memcmp(s.data, data + i * 512, 512)) ok++;
+		}
+		if (ok == spt) return PFD_OK;
+		pf_log("track %d: verify found %d of %d sectors right%s", track, ok, spt, attempt ? "" : ", writing again");
+	}
+	return PFD_MEDIUM;
 }
 
 // the Greaseweazle keeps the motor on until told otherwise

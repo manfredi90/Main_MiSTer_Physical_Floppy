@@ -51,7 +51,7 @@ public:
 	void close() override;
 	int probe(int present, int changed, pfd_geometry *g, char *why, int whysz) override;
 	int read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t *st) override;
-	int write_sectors(const pfd_geometry *g, int lba, int n, const uint8_t *buf) override;
+	int write_track(const pfd_geometry *g, int track, const uint8_t *buf, const uint8_t *dirty, const uint8_t *valid) override;
 	int keep_spinning(const pfd_geometry *g, int track) override;
 };
 
@@ -377,14 +377,28 @@ int UsbDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t
 	return PFD_OK;
 }
 
-int UsbDrive::write_sectors(const pfd_geometry *g, int lba, int n, const uint8_t *buf)
+// writes each run of consecutive changed sectors with one command
+int UsbDrive::write_track(const pfd_geometry *g, int track, const uint8_t *buf, const uint8_t *dirty, const uint8_t *valid)
 {
-	(void)g;
-	int code;
-	int r = rw(1, lba, n, (uint8_t*)buf, &code);
-	int res = result(r, code);
-	if (res == PFD_MEDIUM) pf_log("write error at sector %d (sense %X/%02X/%02X)", lba, SK(code), ASC(code), code & 0xFF);
-	return res;
+	(void)valid;
+	int first = track * g->spt;
+	int n = g->spt;
+	if (first + n > g->total) n = g->total - first;
+
+	for (int i = 0; i < n; )
+	{
+		if (!dirty[i]) { i++; continue; }
+		int run = 1;
+		while (i + run < n && dirty[i + run]) run++;
+
+		int code;
+		int r = rw(1, first + i, run, (uint8_t*)buf + i * 512, &code);
+		int res = result(r, code);
+		if (res == PFD_MEDIUM) pf_log("write error at sector %d (sense %X/%02X/%02X)", first + i, SK(code), ASC(code), code & 0xFF);
+		if (res != PFD_OK) return res;
+		i += run;
+	}
+	return PFD_OK;
 }
 
 // a USB drive stops its motor about a second after the last command: a small read keeps it going
