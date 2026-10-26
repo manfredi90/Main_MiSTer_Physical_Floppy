@@ -30,6 +30,13 @@
 #define MAX_CHUNK         MAX_SPT // reads are done one track at a time
 #define READAHEAD_TRACKS  2      // tracks read in advance after the one in use
 #define SLOW_WAIT_MS      800    // log every sector the core waited longer than this
+
+// 1 = after a disk is inserted read the whole disk in the background, so every
+// later request is served from the cache. Off: the drive reads only what the
+// core asks for (plus a little read-ahead), like a real floppy drive.
+#ifndef PFLOPPY_BACKGROUND_FILL
+#define PFLOPPY_BACKGROUND_FILL 0
+#endif
 #define POLL_MS           1000   // disk presence check when idle
 #define RESCAN_MS         2000   // drive search when no drive is open
 #define IO_TIMEOUT_MS     8000   // spin-up + seek + read
@@ -734,7 +741,7 @@ static void *worker(void *)
 
 				// nothing else to do: keep filling the cache with the rest of the disk,
 				// so later requests from the core don't have to wait for the drive
-				while (chunk < 0 && pf.fill_next < chunks)
+				while (PFLOPPY_BACKGROUND_FILL && chunk < 0 && pf.fill_next < chunks)
 				{
 					int c = pf.fill_next;
 					for (int i = c * size; i < (c + 1) * size && i < pf.media.total_sectors; i++)
@@ -744,7 +751,7 @@ static void *worker(void *)
 					if (chunk < 0) pf.fill_next++;
 				}
 
-				if (chunk < 0 && pf.fill_next >= chunks && !pf.fill_logged)
+				if (PFLOPPY_BACKGROUND_FILL && chunk < 0 && pf.fill_next >= chunks && !pf.fill_logged)
 				{
 					pf.fill_logged = 1;
 					fill_done_ms = now_ms() - pf.fill_t0;
