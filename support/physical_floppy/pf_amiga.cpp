@@ -96,6 +96,8 @@ static struct
 	double read_ms;
 	double last_read;           // last read from the drive (ms)
 	int dumped0;
+	uint8_t dumped[AM_TRACKS];  // diagnostics: revolutions saved for a track the core kept reading
+	int dumps;
 } am;
 
 // main thread: flux played to the core
@@ -367,6 +369,34 @@ static int next_job()
 	return job;
 }
 
+// diagnostics: the core keeps reading the same track (a loader retrying a read
+// that fails?): save its revolutions for analysis
+static void dump_track(int t)
+{
+	pthread_mutex_lock(&am_lock);
+	std::vector<am_rev_p> revs = am.tracks[t].revs;
+	pthread_mutex_unlock(&am_lock);
+	if (revs.empty()) return;
+	am.dumped[t] = 1;
+	am.dumps++;
+	char name[96];
+	snprintf(name, sizeof(name), "/media/fat/logs/pfloppy_t%03d.bin", t);
+	FILE *f = fopen(name, "wb");
+	if (!f) return;
+	for (auto &r : revs)
+	{
+		// per revolution: length, sample clock, number of intervals, intervals
+		std::vector<uint32_t> v;
+		uint32_t acc = 0;
+		for (uint16_t x : r->d) { if (x == 0xFFFF) { acc += 0xFFFF; continue; } v.push_back(acc + x); acc = 0; }
+		uint32_t hdr[3] = { r->len, (uint32_t)am.hz, (uint32_t)v.size() };
+		fwrite(hdr, 4, 3, f);
+		fwrite(v.data(), 4, v.size(), f);
+	}
+	fclose(f);
+	pf_log("diagnostics: the core stays on track %d, %zu revolution(s) saved in %s", t, revs.size(), name);
+}
+
 static void *am_worker(void *)
 {
 	double last_poll = 0, last_scan = -1e9, last_stats = pf_now_ms();
@@ -401,6 +431,10 @@ static void *am_worker(void *)
 
 		if (am.present && active)
 		{
+			int w0 = am.want;
+			if (w0 >= 0 && w0 < AM_TRACKS && !am.dumped[w0] && am.dumps < 8 && am.play_t >= 0 && ms_since(am.play_t) > 5000)
+				dump_track(w0);
+
 			int job = next_job();
 			if (job >= 0)
 			{
@@ -649,6 +683,8 @@ static int am_attach(FluxFile *f)
 	am.last_why[0] = 0;
 	am.reads = am.revs_read = am.cache_hits = 0;
 	am.dumped0 = 0;
+	memset(am.dumped, 0, sizeof(am.dumped));
+	am.dumps = 0;
 	am.read_ms = 0;
 	clear_tracks();
 
