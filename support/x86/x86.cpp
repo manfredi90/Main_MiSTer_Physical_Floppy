@@ -39,6 +39,7 @@
 #include "../../shmem.h"
 #include "../../ide.h"
 #include "x86_share.h"
+#include "../physical_floppy/physical_floppy.h"
 
 #define FDD0_BASE   0xF200
 #define FDD1_BASE   0xF300
@@ -384,8 +385,76 @@ static uint32_t img_write(fileTYPE *f, uint32_t lba, void *buf, uint32_t cnt)
 	return FileWriteAdv(f, buf, cnt * 512);
 }
 
+// Physical USB floppy: send the geometry of the disk in the drive to the core.
+// An eject is always sent first, so the core raises the disk change line.
+static void fdd_push_physical(int num)
+{
+	pfloppy_media_t m;
+	pfloppy_get_media(&m);
+
+	floppy_type[num] = (m.present && m.total_sectors >= 5760) ? FDD_TYPE_2880 : FDD_TYPE_1440;
+
+	uint32_t subaddr = num << 7;
+	IOWR(FDD0_BASE + subaddr, 0x0, 0);
+	usleep(100000);
+
+	if (!m.present)
+	{
+		printf("floppy %c: USB floppy drive, %s\n", 'A' + num, m.drive ? "no disk" : "drive not found");
+		return;
+	}
+
+	printf("floppy %c: USB floppy drive, C/H/S %d/%d/%d, %d sectors%s\n", 'A' + num,
+		m.cylinders, m.heads, m.spt, m.total_sectors, m.write_protected ? ", write-protected" : "");
+
+	IOWR(FDD0_BASE + subaddr, 0x0, 1);
+	IOWR(FDD0_BASE + subaddr, 0x1, m.write_protected ? 1 : 0);
+	IOWR(FDD0_BASE + subaddr, 0x2, m.cylinders);
+	IOWR(FDD0_BASE + subaddr, 0x3, m.spt);
+	IOWR(FDD0_BASE + subaddr, 0x4, m.cylinders * m.heads * m.spt);
+	IOWR(FDD0_BASE + subaddr, 0x5, m.heads);
+	IOWR(FDD0_BASE + subaddr, 0x6, 0);
+	IOWR(FDD0_BASE + subaddr, 0xC, 0);
+}
+
+static void fdd_set_physical(int num)
+{
+	fileTYPE *fdd_image = num ? &fdd1_image : &fdd0_image;
+	FileClose(fdd_image);
+	fdd_image->size = 0;
+
+	int old = pfloppy_unit();
+	if (old >= 0 && old != num)
+	{
+		// only one physical drive: remove it from the other floppy unit
+		IOWR(FDD0_BASE + (old << 7), 0x0, 0);
+		config.img_name[old][0] = 0;
+	}
+
+	pfloppy_attach(num);
+	fdd_push_physical(num);
+}
+
+static int fdd_bootable()
+{
+	if (fdd0_image.size) return 1;
+	if (pfloppy_unit() != 0) return 0;
+
+	pfloppy_media_t m;
+	pfloppy_get_media(&m);
+	return m.present;
+}
+
 static void fdd_set(int num, char* filename)
 {
+	if (pfloppy_is_placeholder(filename))
+	{
+		fdd_set_physical(num);
+		return;
+	}
+
+	if (pfloppy_unit() == num) pfloppy_detach();
+
 	floppy_type[num] = FDD_TYPE_1440;
 
 	fileTYPE *fdd_image = num ? &fdd1_image : &fdd0_image;
@@ -624,6 +693,7 @@ void x86_init(int core_start)
 	user_io_status_set("[0]", 1);
 
 	const char *home = HomeDir();
+	pfloppy_create_placeholder(home);
 
 	if (is_x86())
 	{
@@ -718,7 +788,7 @@ void x86_init(int core_start)
 		0x00, //0x2B: hd 1 configuration 8/9; landing zone high
 		0x00, //0x2C: hd 1 configuration 9/9; sectors/track
 
-		(uint8_t)((fdd0_image.size && boot_from_floppy) ? 0x20 : 0x00), //0x2D: boot sequence
+		(uint8_t)((fdd_bootable() && boot_from_floppy) ? 0x20 : 0x00), //0x2D: boot sequence
 
 		0x00, //0x2E: checksum MSB
 		0x00, //0x2F: checksum LSB
@@ -742,7 +812,7 @@ void x86_init(int core_start)
 		0x00, //0x3B: ?
 		0x00, //0x3C: ?
 
-		(uint8_t)((fdd0_image.size && boot_from_floppy) ? 0x21 : 0x02), //0x3D: eltorito boot sequence
+		(uint8_t)((fdd_bootable() && boot_from_floppy) ? 0x21 : 0x02), //0x3D: eltorito boot sequence
 
 		0x00, //0x3E: ?
 		0x00, //0x3F: ?
@@ -783,11 +853,42 @@ static void fdd_io(uint8_t read)
 
 	x86_dma_recvbuf(FDD0_BASE, sizeof(sd_params) >> 2, (uint32_t*)&sd_params);
 
+	int unit = 0;
 	if (sd_params.lba >> 15)
 	{
 		// Floppy B:
 		sd_params.lba &= 0x7FFF;
 		img = &fdd1_image;
+		unit = 1;
+	}
+
+	if (unit == pfloppy_unit())
+	{
+		if (read)
+		{
+			int r = pfloppy_read(sd_params.lba, (uint8_t*)secbuf);
+
+			// not in the cache yet: leave the request pending, the core keeps
+			// waiting and we answer on a later poll without blocking Main.
+			if (!r) return;
+
+			if (r < 0) memset(secbuf, 0, 512);
+			x86_dma_sendbuf(FDD0_BASE + 255, 128, secbuf);
+		}
+		else
+		{
+			x86_dma_recvbuf(FDD0_BASE + 255, sd_params.cnt * 128, secbuf);
+			if (sd_params.cnt > 0 && sd_params.cnt <= 16)
+			{
+				if (pfloppy_write(sd_params.lba, (uint8_t*)secbuf, sd_params.cnt) < 0)
+					printf("Error: USB floppy write failed (no disk or write-protected).\n");
+			}
+			else
+			{
+				printf("Error: Block count %d is out of range 1..16.\n", sd_params.cnt);
+			}
+		}
+		return;
 	}
 
 	int res = 0;
@@ -860,6 +961,13 @@ void x86_poll(int only_ide)
 			cmos_poll_time = now;
 			x86_cmos_capture();
 		}
+	}
+
+	// USB floppy: disk inserted, removed or changed
+	if (!only_ide)
+	{
+		int unit = pfloppy_unit();
+		if (unit >= 0 && pfloppy_media_event()) fdd_push_physical(unit);
 	}
 
 	uint16_t sd_req = ide_check();

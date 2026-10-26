@@ -1,0 +1,27 @@
+name: Build MiSTer (Physical Floppy)
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM toolchain (gcc 10.2-2020.11, same as upstream)
+        run: |
+          wget -qO- "https://developer.arm.com/-/media/Files/downloads/gnu-a/10.2-2020.11/binrel/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf.tar.xz" | tar -xJ -C /opt
+          echo "$(echo /opt/gcc-arm-*/bin)" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: make
+
+      - name: Rename
+        run: cp bin/MiSTer bin/MiSTer_Physical-Floppy
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MiSTer_Physical-Floppy
+          path: bin/MiSTer_Physical-Floppy
