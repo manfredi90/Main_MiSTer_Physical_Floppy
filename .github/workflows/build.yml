@@ -3,6 +3,11 @@ name: Build MiSTer (Physical Floppy)
 on:
   workflow_dispatch:
   push:
+    branches: [ '**' ]
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -25,3 +30,11 @@ jobs:
         with:
           name: MiSTer_Physical-Floppy
           path: bin/MiSTer_Physical-Floppy
+
+      # a tag v* (for example v1.0) publishes a release with the binary
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/MiSTer_Physical-Floppy
+          generate_release_notes: true
