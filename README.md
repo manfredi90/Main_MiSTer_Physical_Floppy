@@ -1,18 +1,17 @@
 # MiSTer Main – Physical Floppy Support
 
-Use **real floppy disks** on your MiSTer! Plug in a USB floppy drive, or a
-[Greaseweazle](https://github.com/keirf/greaseweazle) with a normal PC floppy
-drive, pop in a disk and the core reads it live, just like the real machine
+Use real floppy disks on your MiSTer. Plug in a USB floppy drive, or a
+[Greaseweazle](https://github.com/keirf/greaseweazle), pop in a disk and the core reads it live, just like the real machine
 would. No need to make disk images first.
 
 > **Heads up: this project was made with the help of AI.** The code was
-> written together with Claude (by Anthropic), and tested on real hardware
-> with real disks. It works well for me, but keep a backup of the disks you
+> written together with Claude, and tested on real hardware
+> with real disks. It works for me and I think it's neat, but keep a backup of the disks you
 > care about.
 
 ## Thanks
 
-This project was inspired by the great work of
+This project was inspired by the work of
 [Anime0t4ku](https://github.com/Anime0t4ku) and his
 [Main_MiSTer_Physical_Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc),
 which lets the MiSTer play real CDs from a USB drive. Seeing real discs
@@ -51,7 +50,7 @@ you pick the special file described below.
 - One of these:
   - a **USB floppy drive**, the common kind you find online (tested with a
     Sony USB-FDU). PC cores only.
-  - a **Greaseweazle** (tested with V4.1 and V4.2) with a normal 3.5" PC
+  - a **Greaseweazle** (tested with V4.1) with a normal 3.5" PC
     floppy drive. Works with every core in the table.
 - For the Amiga **flux mode**: a Minimig core from October 10, 2026 or newer
   (for now that's an unstable build). AmigaDOS mode works with any Minimig.
