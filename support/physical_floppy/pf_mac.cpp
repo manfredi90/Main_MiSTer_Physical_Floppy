@@ -34,6 +34,7 @@ static int mac_heads = 0;
 static int mac_sectors = 0;         // image sectors
 static uint16_t mac_map[1600];      // image sector -> engine sector
 static int mac_placeholder_done = 0;
+static double mac_load_t0 = -1;     // the core is loading the disk since (ms)
 
 int pfloppy_is_mac_placeholder(const char *path)
 {
@@ -75,6 +76,7 @@ uint64_t pfloppy_mac_mount(int index, const char *path)
 {
 	if (mac_slot >= 0 && mac_slot != index) pfloppy_mac_unmount(mac_slot);
 	snprintf(mac_path, sizeof(mac_path), "%s", path);
+	mac_load_t0 = -1;
 
 	if (mac_slot != index)
 	{
@@ -136,12 +138,22 @@ int pfloppy_mac_sd_service(int disk, int op, uint32_t lba, int sz, int ack)
 			}
 			int r = pfloppy_read(mac_gcr ? mac_map[s] : s, buf + k * 512);
 			if (!r) return -1;                       // not read yet: the core waits
+			if (!s && mac_load_t0 < 0)
+			{
+				mac_load_t0 = pf_now_ms();
+				pf_log("the core loads the disk");
+			}
 			if (r < 0) memset(buf + k * 512, 0, 512); // unreadable
 		}
 		EnableIO();
 		spi_w(UIO_SECTOR_RD | ack);
 		spi_block_write(buf, user_io_get_width(), sz);
 		DisableIO();
+		if (mac_load_t0 >= 0 && (int)(lba + n) >= mac_sectors)
+		{
+			pf_log("disk loaded by the core in %.1f s", (pf_now_ms() - mac_load_t0) / 1000);
+			mac_load_t0 = -1;
+		}
 		return 1;
 	}
 

@@ -221,8 +221,13 @@ void pf_log(const char *fmt, ...)
 	log_push(line);
 }
 
+// a new log file the first time the drive is used: one log per core session
+// (a Mac disk in another slot, an Amiga disk change: the log goes on)
 void pf_log_reset()
 {
+	static int done = 0;
+	if (done) return;
+	done = 1;
 	log_push(NULL);
 }
 
