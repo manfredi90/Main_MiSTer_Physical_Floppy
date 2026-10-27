@@ -92,7 +92,7 @@ static struct
 	std::atomic<int> prefetch0;      // read track 0 (disk just inserted)
 
 	char last_why[160];
-	uint32_t reads, revs_read, cache_hits;
+	uint32_t reads;
 	double read_ms;
 	double last_read;           // last read from the drive (ms)
 } am;
@@ -110,15 +110,6 @@ static struct
 	std::vector<uint16_t> rewind;
 	uint32_t seen_data_gen;
 	double wait_t0;         // the core is on a track without data since
-
-	// diagnostics
-	uint32_t calls, rewinds, data_bytes, empty_bytes, track_changes;
-
-	// main loop timing while the core streams flux: the core buffers only
-	// 9 to 18 ms of flux, a longer pause of the main loop empties it
-	double last_poll_ms;
-	uint32_t gaps5, gaps9, gaps16;
-	double gap_max;
 
 	uint16_t my_status;     // drive status set by us
 	uint32_t seen_disk_gen;
@@ -355,7 +346,6 @@ static void am_read_track(int t, int first)
 		if (first) log_density(revs[0]);
 		store_rev(t, revs[0]);
 		am.reads++;
-		am.revs_read++;
 		am.read_ms += ms;
 		break;
 
@@ -488,13 +478,6 @@ static void *am_worker(void *)
 				logged_reads = am.reads;
 				pf_log("stats: %u track reads, %.0f ms each on average", am.reads, am.reads ? am.read_ms / am.reads : 0.0);
 			}
-			if (g.calls)
-			{
-				pf_log("core: %u flux requests (%u given back), %u KB with data, %u KB empty, %u track changes, on track %d",
-					g.calls, g.rewinds, g.data_bytes >> 10, g.empty_bytes >> 10, g.track_changes, g.track);
-				pf_log("main loop pauses while streaming: %u over 5 ms, %u over 9 ms, %u over 16 ms, longest %.1f ms",
-					g.gaps5, g.gaps9, g.gaps16, g.gap_max);
-			}
 		}
 
 		usleep(5000);
@@ -619,7 +602,7 @@ static int am_attach(FluxFile *f)
 	am.last_core = (now_ms31() - AM_ACTIVE_MS - 1) & 0x7FFFFFFF;
 	am.prefetch0 = 0;
 	am.last_why[0] = 0;
-	am.reads = am.revs_read = am.cache_hits = 0;
+	am.reads = 0;
 	am.read_ms = 0;
 	clear_tracks();
 
@@ -630,10 +613,6 @@ static int am_attach(FluxFile *f)
 	g.my_status = 0;
 	g.seen_disk_gen = am.disk_gen;
 	g.df_index = -1;
-	g.calls = g.rewinds = g.data_bytes = g.empty_bytes = g.track_changes = 0;
-	g.last_poll_ms = 0;
-	g.gaps5 = g.gaps9 = g.gaps16 = 0;
-	g.gap_max = 0;
 	am.owner = f;
 
 	am.alive = 1;
@@ -760,16 +739,6 @@ void pfloppy_amiga_poll(void)
 	dos_poll();
 	if (!am.owner) return;
 
-	double t = pf_now_ms();
-	if (g.last_poll_ms > 0 && ms_since(am.last_core) < 50)
-	{
-		double gap = t - g.last_poll_ms;
-		if (gap > 5) g.gaps5++;
-		if (gap > 9) g.gaps9++;
-		if (gap > 16) g.gaps16++;
-		if (gap > g.gap_max) g.gap_max = gap;
-	}
-	g.last_poll_ms = t;
 
 	int i;
 	for (i = 0; i < 4; i++) if (df[i].fluxFile == am.owner) break;
@@ -781,12 +750,12 @@ void pfloppy_amiga_poll(void)
 		// just inserted by InsertFloppy
 		g.df_index = i;
 		g.my_status = d->status;
-		pf_log("core: in DF%d, status %X, ex %X, tracks %d", i, d->status, d->ex_status, d->tracks);
+		pf_log("in DF%d", i);
 		// the flux drive came with the real floppy drive support of the core
 		// (September 2026), the bit that tells it with the zero drives mode
 		if (!floppy_zero_supported)
 		{
-			pf_log("WARNING: this Minimig core seems too old for flux disks (no virtual flux drive): it needs a core from October 2026 or newer (unstable builds)");
+			pf_log("WARNING: this Minimig core seems too old for flux disks (no virtual flux drive): it needs a core from the end of September 2026 or newer (unstable builds for now). _GREASEWEAZLE_DOS_.adf works with any core");
 			Info("Minimig core too old for\nthe Greaseweazle: update it", 6000);
 		}
 	}
@@ -845,7 +814,6 @@ public:
 	{
 		if (track >= AM_TRACKS) track = AM_TRACKS - 1;
 		if ((int)track == g.track) return true;
-		if (++g.track_changes <= 60) pf_log("core: track %d -> %d", g.track, track);
 		am.seq = (int)track == g.track + 1;
 		g.track = track;
 		g.rewind.clear();
@@ -855,7 +823,6 @@ public:
 		g.seen_data_gen = am.data_gen;
 		g.wait_t0 = g.rev ? 0 : pf_now_ms();
 		am.play_t = g.rev ? now_ms31() : -1;
-		if (g.rev) am.cache_hits++;
 		return true;
 	}
 
@@ -870,7 +837,6 @@ public:
 	{
 		am.last_core = now_ms31();
 		if (am.want != g.track) am.want = g.track;
-		g.calls++;
 
 		if (g.rewind.size() == words)
 		{
@@ -893,7 +859,6 @@ public:
 			}
 		}
 
-		if (g.rev) g.data_bytes += words * 2; else g.empty_bytes += words * 2;
 		for (uint32_t i = 0; i < words; i++) out[i] = next_word();
 		return true;
 	}
@@ -901,7 +866,6 @@ public:
 	void unFluxRead(const uint16_t *in, uint32_t words) override
 	{
 		g.rewind.assign(in, in + words);
-		g.rewinds++;
 	}
 
 
