@@ -2,9 +2,9 @@
 #define GCR_MAC_H
 
 /*
- * Macintosh 400K/800K GCR (Sony variable-speed drives): flux -> sectors and
- * sectors -> flux, for a PC drive at a constant 300 RPM (the cell time then
- * depends on the speed zone). Used with the Greaseweazle for the MacPlus.
+ * Macintosh 400K/800K GCR (Sony variable-speed drives): flux -> sectors, read
+ * with a PC drive at a constant 300 RPM (the cell time then depends on the
+ * speed zone). Used with the Greaseweazle for the Mac cores (read-only).
  *
  * The sector checksum code comes from the Greaseweazle host tools (public
  * domain, Keir Fraser), which took it from FluxEngine (David Given), in turn
@@ -31,10 +31,5 @@ int mac_spt(int cyl);
 double mac_cell_s(int cyl);
 
 void mac_gcr_decode(const std::vector<uint32_t> &flux, double sample_freq, int cyl, std::vector<mac_sector> &out);
-
-// a whole track (one revolution of rev_s seconds, written at 300 RPM) from the
-// mac_spt(cyl) sectors in data (524 bytes each, tags first). fmt: 0x22 double
-// sided, 0x02 single sided
-void mac_gcr_encode_track(int cyl, int side, int fmt, const uint8_t *data, double sample_freq, double rev_s, std::vector<uint32_t> &flux);
 
 #endif

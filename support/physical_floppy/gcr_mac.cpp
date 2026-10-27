@@ -1,5 +1,5 @@
 /*
- * Macintosh 400K/800K GCR: flux <-> sectors.
+ * Macintosh 400K/800K GCR: flux -> sectors (reading only).
  *
  * Track: self-sync bytes, then per sector
  *   address field: D5 AA 96, cylinder (low 6 bits), sector, side (side << 5 |
@@ -8,12 +8,11 @@
  *   data field:    D5 AA AD, sector, 703 bytes (524 bytes + checksum), DE AA
  * Every byte on the disk is a 6-and-2 GCR code (a "1" bit is a flux transition).
  *
- * decode_sector(), encode_sector(), the track layout: from the Greaseweazle
- * host tools (public domain), from FluxEngine, inspired by MAME (see gcr_mac.h).
+ * decode_sector(): from the Greaseweazle host tools (public domain), from
+ * FluxEngine, inspired by MAME (see gcr_mac.h).
  */
 
 #include <string.h>
-#include <initializer_list>
 #include "gcr_mac.h"
 #include "mfm_ibm.h"
 
@@ -178,106 +177,3 @@ void mac_gcr_decode(const std::vector<uint32_t> &flux, double sample_freq, int c
 	}
 }
 
-// 524 bytes -> 703 6-bit values
-static void encode_sector(const uint8_t *input, uint8_t *output)
-{
-	const uint8_t *in = input;
-	uint8_t *out = output;
-	uint8_t b1[LOOKUP_LEN + 1], b2[LOOKUP_LEN + 1], b3[LOOKUP_LEN + 1];
-
-	uint32_t c1 = 0, c2 = 0, c3 = 0;
-	for (int j = 0;; j++)
-	{
-		c1 = (c1 & 0xff) << 1;
-		if (c1 & 0x0100) c1++;
-
-		uint8_t val = *in++;
-		c3 += val;
-		if (c1 & 0x0100) { c3++; c1 &= 0xff; }
-		b1[j] = (val ^ c1) & 0xff;
-
-		val = *in++;
-		c2 += val;
-		if (c3 > 0xff) { c2++; c3 &= 0xff; }
-		b2[j] = (val ^ c3) & 0xff;
-
-		if ((in - input) == MAC_SECTOR_BYTES) break;
-
-		val = *in++;
-		c1 += val;
-		if (c2 > 0xff) { c1++; c2 &= 0xff; }
-		b3[j] = (val ^ c2) & 0xff;
-	}
-	uint32_t c4 = ((c1 & 0xc0) >> 6) | ((c2 & 0xc0) >> 4) | ((c3 & 0xc0) >> 2);
-	b3[LOOKUP_LEN] = 0;
-
-	for (int i = 0; i <= LOOKUP_LEN; i++)
-	{
-		*out++ = ((b1[i] & 0xc0) >> 2) | ((b2[i] & 0xc0) >> 4) | ((b3[i] & 0xc0) >> 6);
-		*out++ = b1[i] & 0x3f;
-		*out++ = b2[i] & 0x3f;
-		if (i != LOOKUP_LEN) *out++ = b3[i] & 0x3f;
-	}
-	*out++ = c4 & 0x3f;
-	*out++ = c3 & 0x3f;
-	*out++ = c2 & 0x3f;
-	*out++ = c1 & 0x3f;
-}
-
-void mac_gcr_encode_track(int cyl, int side, int fmt, const uint8_t *data, double sample_freq, double rev_s, std::vector<uint32_t> &flux)
-{
-	static const uint8_t self_sync[6] = { 0xff, 0x3f, 0xcf, 0xf3, 0xfc, 0xff };
-	std::vector<uint8_t> t;
-	auto sync = [&](int n) { for (int i = 0; i < n; i++) t.insert(t.end(), self_sync, self_sync + 6); };
-	auto raw = [&](std::initializer_list<uint8_t> b) { t.insert(t.end(), b); };
-
-	int spt = mac_spt(cyl);
-	double cell = mac_cell_s(cyl);
-
-	// post-index gap
-	t.assign(64, 0x96);
-	sync(20);
-
-	// sectors with a 2:1 interleave: 0, spt/2, 1, spt/2 + 1, ...
-	for (int nr = 0; nr < spt; nr++)
-	{
-		int sec = (nr & 1) ? (spt + 1) / 2 + nr / 2 : nr / 2;
-		uint8_t hdr[5] = { (uint8_t)(cyl & 0x3f), (uint8_t)sec, (uint8_t)((side << 5) | (cyl >> 6)), (uint8_t)fmt, 0 };
-		hdr[4] = hdr[0] ^ hdr[1] ^ hdr[2] ^ hdr[3];
-
-		sync(6);
-		raw({ 0xd5, 0xaa, 0x96 });
-		for (int i = 0; i < 5; i++) t.push_back(gcr6[hdr[i] & 0x3f]);
-		raw({ 0xde, 0xaa, 0xff, 0xff });
-		sync(1);
-		raw({ 0xd5, 0xaa, 0xad });
-		t.push_back(gcr6[sec & 0x3f]);
-		uint8_t enc[703];
-		encode_sector(data + sec * MAC_SECTOR_BYTES, enc);
-		for (int i = 0; i < 703; i++) t.push_back(gcr6[enc[i]]);
-		raw({ 0xde, 0xaa, 0xff });
-	}
-
-	// pre-index gap, to the end of the revolution
-	raw({ 0xff, 0xff, 0xff, 0xff });
-	size_t tlen = ((size_t)(rev_s / cell) & ~(size_t)31) / 8;
-	while (t.size() < tlen) t.push_back(0x96);
-
-	// bits -> flux; the time of the cells with no transition goes into the next one
-	flux.clear();
-	flux.reserve(t.size() * 5);
-	double cells = 0, carry = 0;
-	for (uint8_t b : t)
-		for (int i = 7; i >= 0; i--)
-		{
-			cells++;
-			if (!((b >> i) & 1)) continue;
-			double v = cells * cell * sample_freq + carry;
-			uint32_t f = (uint32_t)(v + 0.5);
-			carry = v - f;
-			flux.push_back(f);
-			cells = 0;
-		}
-	// the cells after the last transition: added to the first one (the track wraps)
-	if (cells && !flux.empty()) flux[0] += (uint32_t)(cells * cell * sample_freq + 0.5);
-}
