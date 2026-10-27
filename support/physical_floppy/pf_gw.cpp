@@ -27,6 +27,8 @@
 #include "mfm_ibm.h"
 #include "mfm_amiga.h"
 #include "gcr_mac.h"
+
+#define MAC_READ_S 0.235   // Mac GCR track read: 1.15 revolutions at 300 RPM + 5 ms
 #include "../../cfg.h"
 
 int gw_set_baud(int fd, int baud);
@@ -637,7 +639,18 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 
 	for (int attempt = 0; attempt < READ_ATTEMPTS; attempt++)
 	{
-		r = read_flux(1, flux);
+		if (gcr())
+		{
+			// Mac GCR tracks are not written from the index pulse: read from where
+			// the head is, a revolution plus the longest sector (an eighth of a
+			// track on cylinders 64-79), instead of waiting for the index
+			// (1.5 revolutions on average)
+			std::vector<uint32_t> idx;
+			r = read_flux_cmd((uint32_t)(freq * MAC_READ_S), 0, flux, &idx, NULL);
+			if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+			if (!r && idx.empty()) return PFD_CHANGED; // no index pulse in a revolution: not spinning
+		}
+		else r = read_flux(1, flux);
 		if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 		if (r == ACK_NO_INDEX) return PFD_CHANGED; // no rotation: disk removed
 		if (r) continue;                           // overflow etc: read again
