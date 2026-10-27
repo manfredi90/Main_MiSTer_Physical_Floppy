@@ -82,10 +82,15 @@ uint64_t pfloppy_mac_mount(int index, const char *path)
 	{
 		int sd = pfloppy_mac_core() == 2;
 		pfloppy_set_format(sd ? PFLOPPY_FORMAT_MAC_SD : PFLOPPY_FORMAT_MAC);
-		pfloppy_attach(index); // looks at the disk before returning
+		// not waiting for the drive: the core may be running from its hard disk,
+		// whose requests must keep being served. The slot is empty until the
+		// disk is found (pfloppy_mac_poll mounts it then)
+		pfloppy_attach_async(index);
 		mac_slot = index;
 		pf_log("%s floppy slot %d: %s disks, the whole disk is read when it is inserted, read-only", user_io_get_core_name(0), index,
 			sd ? "400K/800K GCR and 720K/1.44 MB MFM" : "400K/800K GCR");
+		mac_sectors = 0;
+		return 0;
 	}
 	pfloppy_media_event();
 

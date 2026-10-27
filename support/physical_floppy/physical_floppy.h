@@ -49,6 +49,11 @@ void pfloppy_set_format(int format);
 // use the drive as floppy unit 0 (A:) or 1 (B:). Probes the disk before returning.
 void pfloppy_attach(int unit);
 
+// same, without waiting: the drive is opened and the disk looked at by the I/O
+// thread, a disk found is reported by pfloppy_media_event() (the main loop is
+// not held for seconds: other devices of the core keep being served)
+void pfloppy_attach_async(int unit);
+
 // stop using the drive (pending writes are flushed first)
 void pfloppy_detach(void);
 

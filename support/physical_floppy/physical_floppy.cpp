@@ -833,7 +833,7 @@ void pfloppy_set_format(int format)
 	pf_format = format;
 }
 
-void pfloppy_attach(int unit)
+static void attach(int unit, int sync)
 {
 	pthread_mutex_lock(&pf.lock);
 	pf.unit = unit;
@@ -848,8 +848,12 @@ void pfloppy_attach(int unit)
 	else plog("attached as floppy %c:", 'A' + unit);
 
 	// first look done here, so the BIOS sees a disk inserted before boot
-	if (!pf.drv && open_drive()) probe_media();
-	pf.event = 0;
+	// (async: by the I/O thread, the disk is reported with a media event)
+	if (sync)
+	{
+		if (!pf.drv && open_drive()) probe_media();
+		pf.event = 0;
+	}
 
 	pf.alive = 1;
 	if (pthread_create(&pf.thread, NULL, worker, NULL))
@@ -860,6 +864,9 @@ void pfloppy_attach(int unit)
 	}
 	pf.thread_running = 1;
 }
+
+void pfloppy_attach(int unit) { attach(unit, 1); }
+void pfloppy_attach_async(int unit) { attach(unit, 0); }
 
 void pfloppy_detach(void)
 {
