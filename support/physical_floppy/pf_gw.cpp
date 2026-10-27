@@ -870,12 +870,45 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 // finds the drive: only a connected drive asserts /TRK0, so a recalibration
 // (seek to cylinder 0) succeeds only on the right unit. Works without a disk.
 // returns 1 found, 0 not found, -1 communication error
+// the unit the drive was found on, kept in /tmp for the next core (each core
+// starts Main again): -1 not known
+#define LAST_UNIT_PATH "/tmp/pfloppy_gw_unit"
+static int last_unit_get()
+{
+	int u = -1;
+	FILE *f = fopen(LAST_UNIT_PATH, "r");
+	if (f)
+	{
+		if (fscanf(f, "%d", &u) != 1) u = -1;
+		fclose(f);
+	}
+	return (u == 0 || u == 1) ? u : -1;
+}
+
+static void last_unit_set(int u)
+{
+	if (last_unit_get() == u) return;
+	FILE *f = fopen(LAST_UNIT_PATH, "w");
+	if (f)
+	{
+		fprintf(f, "%d\n", u);
+		fclose(f);
+	}
+}
+
 int GwDrive::find_unit()
 {
 	int units[2], n = 0;
 	if (cfg.pfloppy_gw_drive == 1) units[n++] = 0;
 	else if (cfg.pfloppy_gw_drive == 2) units[n++] = 1;
-	else { units[n++] = 0; units[n++] = 1; }
+	else
+	{
+		// the unit found last time first: looking for a drive on the other one
+		// costs about 2.5 s (the recalibration times out)
+		int last = last_unit_get();
+		units[n++] = last == 1 ? 1 : 0;
+		units[n++] = last == 1 ? 0 : 1;
+	}
 
 	for (int i = 0; i < n; i++)
 	{
@@ -887,6 +920,7 @@ int GwDrive::find_unit()
 		if (r == ACK_OKAY)
 		{
 			unit_ok = 1;
+			if (!cfg.pfloppy_gw_drive) last_unit_set(unit);
 			pf_log("Greaseweazle: floppy drive found as drive %c%s", 'A' + unit,
 				cfg.pfloppy_gw_drive ? "" : " (automatic, MiSTer.ini PFLOPPY_GW_DRIVE=1/2 forces A/B)");
 			return 1;
