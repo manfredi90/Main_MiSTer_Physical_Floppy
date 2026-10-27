@@ -264,11 +264,11 @@ static int pf_format = PFLOPPY_FORMAT_PC;
 static int open_drive()
 {
 	if (!pf.usb) pf.usb = pfd_usb_create();
-	if (!pf.gw) pf.gw = pf_format == PFLOPPY_FORMAT_AMIGA ? pfd_gw_create_amiga() : pfd_gw_create();
+	if (!pf.gw) pf.gw = pf_format == PFLOPPY_FORMAT_AMIGA ? pfd_gw_create_amiga() : pf_format == PFLOPPY_FORMAT_MAC ? pfd_gw_create_mac() : pfd_gw_create();
 
 	PfDrive *order[2];
 	int n = 0;
-	if (cfg.pfloppy_drive != 1 || pf_format == PFLOPPY_FORMAT_AMIGA) order[n++] = pf.gw;
+	if (cfg.pfloppy_drive != 1 || pf_format != PFLOPPY_FORMAT_PC) order[n++] = pf.gw;
 	if (cfg.pfloppy_drive != 2 && pf_format == PFLOPPY_FORMAT_PC) order[n++] = pf.usb; // USB drives can't read Amiga disks
 
 	for (int i = 0; i < n; i++)
@@ -353,7 +353,8 @@ static void set_media(const pfd_geometry *g)
 	pf.last_why[0] = 0;
 	pthread_mutex_unlock(&pf.lock);
 
-	plog("disk inserted: %d sectors (%dK) C/H/S %d/%d/%d%s", g->total, g->total / 2, g->cyl, g->heads, g->spt, g->wp ? " write-protected" : "");
+	if (pf_format == PFLOPPY_FORMAT_MAC) plog("disk inserted: %d sides%s", g->heads, g->wp ? " write-protected" : "");
+	else plog("disk inserted: %d sectors (%dK) C/H/S %d/%d/%d%s", g->total, g->total / 2, g->cyl, g->heads, g->spt, g->wp ? " write-protected" : "");
 }
 
 // checks the disk in the drive and updates the media state
@@ -838,7 +839,8 @@ void pfloppy_attach(int unit)
 	if (!pf.data) pf.data = (uint8_t*)malloc(MAX_SECTORS * 512);
 
 	pf_log_reset();
-	plog("attached as floppy %c:", 'A' + unit);
+	if (pf_format == PFLOPPY_FORMAT_MAC) plog("attached to floppy slot %d", unit);
+	else plog("attached as floppy %c:", 'A' + unit);
 
 	// first look done here, so the BIOS sees a disk inserted before boot
 	if (!pf.drv && open_drive()) probe_media();

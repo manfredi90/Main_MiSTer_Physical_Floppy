@@ -26,6 +26,7 @@
 #include "pf_drive.h"
 #include "mfm_ibm.h"
 #include "mfm_amiga.h"
+#include "gcr_mac.h"
 #include "../../cfg.h"
 
 int gw_set_baud(int fd, int baud);
@@ -62,6 +63,7 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int selected = 0, motor = 0;
 	int double_step = 0;
 	int amiga = 0;           // AmigaDOS disks (11 sectors of 512 bytes per track) instead of PC disks
+	int mac = 0;             // Macintosh 400K/800K GCR disks (12 to 8 sectors per track by zone)
 	double cell_ns = 1000;
 	int noclick = 1;
 	double rev_ticks = 0;    // measured revolution time (sample ticks)
@@ -92,11 +94,12 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int detect(pfd_geometry *g, char *why, int whysz);
 	int read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs);
 
-	void decode(const std::vector<uint32_t> &flux, std::vector<mfm_sector> &out);
+	void decode(const std::vector<uint32_t> &flux, int cyl, std::vector<mfm_sector> &out);
 	int detect_amiga(pfd_geometry *g, char *why, int whysz);
+	int detect_mac(pfd_geometry *g, char *why, int whysz);
 
 public:
-	GwDrive(int amiga_disks = 0) : amiga(amiga_disks) {}
+	GwDrive(int amiga_disks = 0, int mac_disks = 0) : amiga(amiga_disks), mac(mac_disks) {}
 	int open(char *desc, int descsz) override;
 	void close() override;
 	int probe(int present, int changed, pfd_geometry *g, char *why, int whysz) override;
@@ -116,6 +119,7 @@ public:
 
 PfDrive *pfd_gw_create() { return new GwDrive(); }
 PfDrive *pfd_gw_create_amiga() { return new GwDrive(1); }
+PfDrive *pfd_gw_create_mac() { return new GwDrive(0, 1); }
 PfFluxDrive *pfd_gw_flux_create() { return new GwDrive(); }
 
 /* ------------------------------------------------------------------ serial */
@@ -633,7 +637,7 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 		if (r == ACK_NO_INDEX) return PFD_CHANGED; // no rotation: disk removed
 		if (r) continue;                           // overflow etc: read again
 
-		decode(flux, out);
+		decode(flux, cyl, out);
 		for (auto &s : out)
 		{
 			if (!s.ok || s.n != 2 || s.sec < 1 || s.sec > 63) continue;
@@ -651,8 +655,27 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 
 // sectors of a track, as PC sectors: an AmigaDOS sector n (0..10) of track t
 // becomes sector n + 1 of cylinder t / 2, head t % 2
-void GwDrive::decode(const std::vector<uint32_t> &flux, std::vector<mfm_sector> &out)
+void GwDrive::decode(const std::vector<uint32_t> &flux, int cyl, std::vector<mfm_sector> &out)
 {
+	if (mac)
+	{
+		// Mac sector n (0..) of a side: sector n + 1, data without the 12 tag bytes
+		std::vector<mac_sector> ms;
+		mac_gcr_decode(flux, freq, cyl, ms);
+		out.clear();
+		for (auto &m : ms)
+		{
+			mfm_sector s;
+			s.cyl = m.cyl;
+			s.head = m.side;
+			s.sec = m.sec + 1;
+			s.n = 2;
+			s.ok = m.ok;
+			memcpy(s.data, m.data + 12, 512);
+			out.push_back(s);
+		}
+		return;
+	}
 	if (!amiga)
 	{
 		mfm_ibm_decode(flux, freq, cell_ns, out);
@@ -698,6 +721,37 @@ int GwDrive::detect_amiga(pfd_geometry *g, char *why, int whysz)
 	return PFD_PROBE_NEW;
 }
 
+// Mac disks: 400K single sided, 800K double sided. The geometry given to the
+// engine has 12 sectors on every track (the most, cylinders 0-15): the real
+// count of each zone is used when reading, the slots after it stay unused
+int GwDrive::detect_mac(pfd_geometry *g, char *why, int whysz)
+{
+	std::vector<mfm_sector> secs;
+	double_step = 0;
+	int r = read_good(0, 0, 1, mac_spt(0), secs);
+	if (r == PFD_LOST) { snprintf(why, whysz, "Greaseweazle not responding"); return PFD_PROBE_LOST; }
+	if (r == PFD_NOT_READY || r == PFD_CHANGED) return PFD_PROBE_BUSY;
+	if (r != PFD_OK || (int)secs.size() < mac_spt(0) / 2)
+	{
+		snprintf(why, whysz, "disk present but no Macintosh GCR sectors on track 0 (%zu found)", secs.size());
+		return PFD_PROBE_UNREADABLE;
+	}
+
+	r = read_good(0, 1, 2, mac_spt(0), secs);
+	if (r == PFD_LOST) { snprintf(why, whysz, "Greaseweazle not responding"); return PFD_PROBE_LOST; }
+	if (r == PFD_NOT_READY || r == PFD_CHANGED) return PFD_PROBE_BUSY;
+	int heads = secs.size() ? 2 : 1;
+
+	int wp = get_pin(28);
+	g->spt = MAC_MAX_SPT;
+	g->heads = heads;
+	g->cyl = 80;
+	g->total = MAC_MAX_SPT * heads * 80;
+	g->wp = (wp == 0);
+	pf_log("format: Macintosh %s GCR%s", heads == 2 ? "800K" : "400K", wp == 0 ? ", write-protect tab set" : "");
+	return PFD_PROBE_NEW;
+}
+
 static int max_sector(const std::vector<mfm_sector> &secs)
 {
 	int m = 0;
@@ -711,6 +765,7 @@ int GwDrive::detect(pfd_geometry *g, char *why, int whysz)
 	std::vector<mfm_sector> secs;
 
 	if (amiga) return detect_amiga(g, why, whysz);
+	if (mac) return detect_mac(g, why, whysz);
 
 	double_step = 0;
 	if (motor_on() || seek(0) < 0 || head(0) < 0)
@@ -1080,15 +1135,18 @@ int GwDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t 
 	if (chg < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 	if (chg == 0) return PFD_CHANGED;
 
+	// Mac: the sectors of this zone; the other slots of the track are unused
+	int spt = mac ? mac_spt(cyl) : g->spt;
 	std::vector<mfm_sector> secs;
-	int r = read_good(cyl, hd, g->heads, g->spt, secs);
+	int r = read_good(cyl, hd, g->heads, spt, secs);
 	if (r != PFD_OK) return r;
 
-	memset(st, 2, g->spt);
+	memset(st, 1, g->spt);
+	memset(st, 2, spt);
 	memset(buf, 0, g->spt * 512);
 	for (auto &s : secs)
 	{
-		if (s.sec > g->spt) continue;
+		if (s.sec > spt) continue;
 		memcpy(buf + (s.sec - 1) * 512, s.data, 512);
 		st[s.sec - 1] = 1;
 	}
@@ -1150,6 +1208,8 @@ int GwDrive::write_track(const pfd_geometry *g, int track, const uint8_t *buf, c
 	int cyl = track / g->heads;
 	int hd = track % g->heads;
 	int spt = g->spt;
+
+	if (mac) return PFD_WP; // writing Mac disks: not yet
 
 	if (select(1)) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 	int chg = get_pin(34);

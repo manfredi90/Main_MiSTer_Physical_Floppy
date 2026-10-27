@@ -2220,8 +2220,19 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 
 	sd_image_cangrow[index] = (pre != 0);
 	sd_type[index] = SD_TYPE_DEFAULT ;
-	if (len)
+	if (len && pfloppy_mac_core() && pfloppy_is_mac_placeholder(name))
 	{
+		// MacPlus floppy slot: the Greaseweazle drive (support/physical_floppy/pf_mac.cpp)
+		FileClose(&sd_image[index]);
+		sd_image[index].offset = 0;
+		sd_image[index].size = pfloppy_mac_mount(index, name);
+		ret = sd_image[index].size ? 1 : 0;
+		writable = 0;
+		if (!ret) printf("No disk in the Greaseweazle drive\n");
+	}
+	else if (len)
+	{
+		pfloppy_mac_unmount(index);
 		if (!ret)
 		{
 			if (x2trd_ext_supp(name))
@@ -2331,6 +2342,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	}
 	else
 	{
+		pfloppy_mac_unmount(index);
 		FileClose(&sd_image[index]);
 		c64_closeGCR(index);
 		mac_cdrom_unmount(index);
@@ -3345,6 +3357,7 @@ void user_io_poll()
 	user_io_send_buttons(0);
 
 	mac_poll();   // Mac SCSI family: Toolbox slot announce + deferred CD work
+	if (pfloppy_mac_core()) pfloppy_mac_poll();
 	sun_poll();   // Sun SCSI family: write-buffer flushes
 	hp9k_poll();
 	sgi_poll();
@@ -3513,7 +3526,12 @@ void user_io_poll()
 				blks = 1;
 			}
 			DisableIO();
-			if ( sd_type[disk] == SD_TYPE_A2)
+			if (int pfop = pfloppy_mac_sd_service(disk, op, lba, sz, ack))
+			{
+				// MacPlus floppy slot on the Greaseweazle drive; SPI is done by the hook.
+				if (pfop < 0) break;
+			}
+			else if ( sd_type[disk] == SD_TYPE_A2)
 			{
 				//if (op) printf("A2 %x %llu on %d\n", op,lba, disk);
 				if (op == 2) a2_writeDSK(&sd_image[disk], lba, ack);

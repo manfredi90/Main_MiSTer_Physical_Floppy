@@ -42,6 +42,7 @@ void pfloppy_create_placeholder_named(const char *dir, const char *name);
 // Set before pfloppy_attach.
 #define PFLOPPY_FORMAT_PC    0
 #define PFLOPPY_FORMAT_AMIGA 1
+#define PFLOPPY_FORMAT_MAC   2
 void pfloppy_set_format(int format);
 
 // use the drive as floppy unit 0 (A:) or 1 (B:). Probes the disk before returning.
@@ -92,5 +93,25 @@ FluxFile *pfloppy_amiga_create(void);
 
 // called from the Minimig poll loop: reports disk insertions and removals to the core
 void pfloppy_amiga_poll(void);
+
+/*
+ * MacPlus: the drive in a floppy slot (S2/S3) of the core, which loads the
+ * whole disk at insertion: the disk is read from the Greaseweazle then (about
+ * a minute for 800K). Read-only for now.
+ */
+#define PFLOPPY_MAC_PLACEHOLDER "_GREASEWEAZLE_.dsk"
+
+int pfloppy_is_mac_placeholder(const char *path);
+int pfloppy_mac_core(void);                     // 1 if the core is the MacPlus
+
+// user_io_file_mount: the placeholder in slot index. Returns the image size (0 = no disk)
+uint64_t pfloppy_mac_mount(int index, const char *path);
+void pfloppy_mac_unmount(int index);
+
+// user_io SD requests: 0 = not ours, 1 = served, -1 = not ready (ask again later)
+int pfloppy_mac_sd_service(int disk, int op, uint32_t lba, int sz, int ack);
+
+// user_io_poll: a disk inserted, removed or changed is mounted again
+void pfloppy_mac_poll(void);
 
 #endif
