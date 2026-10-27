@@ -71,7 +71,7 @@ public:
 PfDrive *pfd_usb_create();
 PfDrive *pfd_gw_create();
 PfDrive *pfd_gw_create_amiga();  // AmigaDOS disks
-PfDrive *pfd_gw_create_mac();    // Macintosh 400K/800K disks
+PfDrive *pfd_gw_create_mac(int superdrive); // Macintosh 400K/800K disks, + 720K/1.44 MB MFM with superdrive
 
 // one revolution of a track, from index pulse to index pulse: flux intervals in
 // sample ticks (the first one counted from the index pulse), len = revolution time

@@ -64,6 +64,9 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int double_step = 0;
 	int amiga = 0;           // AmigaDOS disks (11 sectors of 512 bytes per track) instead of PC disks
 	int mac = 0;             // Macintosh 400K/800K GCR disks (12 to 8 sectors per track by zone)
+	int mac_sd = 0;          // Mac SuperDrive: MFM disks (720K, 1.44 MB) too
+	int mac_mfm = 0;         // the Mac disk in the drive is MFM (read as a PC disk)
+	int gcr() const { return mac && !mac_mfm; }
 	double cell_ns = 1000;
 	int noclick = 1;
 	double rev_ticks = 0;    // measured revolution time (sample ticks)
@@ -97,9 +100,11 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	void decode(const std::vector<uint32_t> &flux, int cyl, std::vector<mfm_sector> &out);
 	int detect_amiga(pfd_geometry *g, char *why, int whysz);
 	int detect_mac(pfd_geometry *g, char *why, int whysz);
+	int detect_pc(pfd_geometry *g, char *why, int whysz);
 
 public:
-	GwDrive(int amiga_disks = 0, int mac_disks = 0) : amiga(amiga_disks), mac(mac_disks) {}
+	// mac_disks: 1 = Mac GCR disks, 2 = GCR and MFM (SuperDrive)
+	GwDrive(int amiga_disks = 0, int mac_disks = 0) : amiga(amiga_disks), mac(mac_disks != 0), mac_sd(mac_disks == 2) {}
 	int open(char *desc, int descsz) override;
 	void close() override;
 	int probe(int present, int changed, pfd_geometry *g, char *why, int whysz) override;
@@ -119,7 +124,7 @@ public:
 
 PfDrive *pfd_gw_create() { return new GwDrive(); }
 PfDrive *pfd_gw_create_amiga() { return new GwDrive(1); }
-PfDrive *pfd_gw_create_mac() { return new GwDrive(0, 1); }
+PfDrive *pfd_gw_create_mac(int superdrive) { return new GwDrive(0, superdrive ? 2 : 1); }
 PfFluxDrive *pfd_gw_flux_create() { return new GwDrive(); }
 
 /* ------------------------------------------------------------------ serial */
@@ -657,7 +662,7 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 // becomes sector n + 1 of cylinder t / 2, head t % 2
 void GwDrive::decode(const std::vector<uint32_t> &flux, int cyl, std::vector<mfm_sector> &out)
 {
-	if (mac)
+	if (gcr())
 	{
 		// Mac sector n (0..) of a side: sector n + 1, data without the 12 tag bytes
 		std::vector<mac_sector> ms;
@@ -761,11 +766,27 @@ static int max_sector(const std::vector<mfm_sector> &secs)
 
 int GwDrive::detect(pfd_geometry *g, char *why, int whysz)
 {
+	if (amiga) return detect_amiga(g, why, whysz);
+	if (!mac) return detect_pc(g, why, whysz);
+
+	mac_mfm = 0;
+	int r = detect_mac(g, why, whysz);
+	if (r != PFD_PROBE_UNREADABLE || !mac_sd) return r;
+
+	// SuperDrive: a 720K / 1.44 MB MFM disk, the PC format
+	mac_mfm = 1;
+	char why2[160];
+	r = detect_pc(g, why2, sizeof(why2));
+	if (r != PFD_PROBE_NEW) mac_mfm = 0;
+	if (r == PFD_PROBE_UNREADABLE) snprintf(why, whysz, "disk present but neither Macintosh GCR nor MFM sectors on track 0");
+	else if (r != PFD_PROBE_NEW) snprintf(why, whysz, "%s", why2);
+	return r;
+}
+
+int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
+{
 	std::vector<uint32_t> flux;
 	std::vector<mfm_sector> secs;
-
-	if (amiga) return detect_amiga(g, why, whysz);
-	if (mac) return detect_mac(g, why, whysz);
 
 	double_step = 0;
 	if (motor_on() || seek(0) < 0 || head(0) < 0)
@@ -1136,7 +1157,7 @@ int GwDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t 
 	if (chg == 0) return PFD_CHANGED;
 
 	// Mac: the sectors of this zone; the other slots of the track are unused
-	int spt = mac ? mac_spt(cyl) : g->spt;
+	int spt = gcr() ? mac_spt(cyl) : g->spt;
 	std::vector<mfm_sector> secs;
 	int r = read_good(cyl, hd, g->heads, spt, secs);
 	if (r != PFD_OK) return r;

@@ -1,8 +1,8 @@
 /*
- * Physical floppy for the MacPlus: the Greaseweazle drive in a floppy slot
- * (S2 internal, S3 external) of the core.
+ * Physical floppy for the Macintosh cores: the Greaseweazle drive in a floppy
+ * slot of the core (MacPlus S2/S3, MacLC S6, MacSE30/MacIIcx S0/S1).
  *
- * The core loads the whole disk image into its memory when the image is
+ * These cores load the whole disk image into its memory when the image is
  * mounted (floppy_loader.v) and asks for it sector by sector: the requests
  * are served from the sector engine (physical_floppy.cpp, Mac GCR decoded in
  * pf_gw.cpp / gcr_mac.cpp), a sector not read yet is answered later (the core
@@ -10,6 +10,8 @@
  * side 0 then side 1, 12 sectors per track on cylinders 0-15 down to 8 on
  * 64-79. The engine has 12 slots on every track: an image sector maps to
  * (cylinder * heads + side) * 12 + sector.
+ * The SuperDrive cores (MacLC, MacSE30) also take 720K / 1.44 MB MFM disks:
+ * read as PC disks, the image is in the engine's order.
  *
  * A disk inserted, removed or changed is mounted again: the core reloads it.
  * Read-only for now.
@@ -26,9 +28,10 @@
 #include "../../spi.h"
 
 static int mac_slot = -1;           // slot with the placeholder, -1 none
+static int mac_gcr = 1;             // the disk is GCR (else MFM)
 static char mac_path[1024];
 static int mac_heads = 0;
-static int mac_sectors = 0;         // image sectors (800 or 1600)
+static int mac_sectors = 0;         // image sectors
 static uint16_t mac_map[1600];      // image sector -> engine sector
 static int mac_placeholder_done = 0;
 
@@ -40,9 +43,21 @@ int pfloppy_is_mac_placeholder(const char *path)
 	return !strcasecmp(p, PFLOPPY_MAC_PLACEHOLDER);
 }
 
+// the Mac cores with a floppy loaded at insertion (block device slot)
+static const struct { const char *name; int superdrive; } mac_cores[] =
+{
+	{ "MACPLUS", 0 },
+	{ "MACLC",   1 },
+	{ "MACSE30", 1 },
+	{ "MACIICX", 1 },
+};
+
 int pfloppy_mac_core(void)
 {
-	return !strcasecmp(user_io_get_core_name(0), "macplus") || !strcasecmp(user_io_get_core_name(1), "macplus");
+	for (auto &c : mac_cores)
+		if (!strcasecmp(user_io_get_core_name(0), c.name) || !strcasecmp(user_io_get_core_name(1), c.name))
+			return c.superdrive ? 2 : 1;
+	return 0;
 }
 
 static void build_map(int heads)
@@ -63,10 +78,12 @@ uint64_t pfloppy_mac_mount(int index, const char *path)
 
 	if (mac_slot != index)
 	{
-		pfloppy_set_format(PFLOPPY_FORMAT_MAC);
+		int sd = pfloppy_mac_core() == 2;
+		pfloppy_set_format(sd ? PFLOPPY_FORMAT_MAC_SD : PFLOPPY_FORMAT_MAC);
 		pfloppy_attach(index); // looks at the disk before returning
 		mac_slot = index;
-		pf_log("MacPlus floppy slot %d (the whole disk is read when it is inserted, read-only)", index);
+		pf_log("%s floppy slot %d: %s disks, the whole disk is read when it is inserted, read-only", user_io_get_core_name(0), index,
+			sd ? "400K/800K GCR and 720K/1.44 MB MFM" : "400K/800K GCR");
 	}
 	pfloppy_media_event();
 
@@ -77,8 +94,17 @@ uint64_t pfloppy_mac_mount(int index, const char *path)
 		mac_sectors = 0;
 		return 0;
 	}
-	build_map(m.heads);
-	pf_log("disk given to the core: %s", mac_heads == 2 ? "800K" : "400K");
+	mac_gcr = (m.spt == MAC_MAX_SPT);
+	if (mac_gcr)
+	{
+		build_map(m.heads);
+		pf_log("disk given to the core: %s GCR", mac_heads == 2 ? "800K" : "400K");
+	}
+	else
+	{
+		mac_sectors = m.total_sectors;
+		pf_log("disk given to the core: %dK MFM%s", mac_sectors / 2, (mac_sectors == 1440 || mac_sectors == 2880) ? "" : " (not a Mac size: the core will not take it)");
+	}
 	return (uint64_t)mac_sectors * 512;
 }
 
@@ -108,7 +134,7 @@ int pfloppy_mac_sd_service(int disk, int op, uint32_t lba, int sz, int ack)
 				memset(buf + k * 512, 0, 512);
 				continue;
 			}
-			int r = pfloppy_read(mac_map[s], buf + k * 512);
+			int r = pfloppy_read(mac_gcr ? mac_map[s] : s, buf + k * 512);
 			if (!r) return -1;                       // not read yet: the core waits
 			if (r < 0) memset(buf + k * 512, 0, 512); // unreadable
 		}
