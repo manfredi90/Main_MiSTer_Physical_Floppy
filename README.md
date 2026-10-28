@@ -134,6 +134,35 @@ A few things worth knowing:
   example, likes to write to a floppy even when you're only copying files
   from it.
 
+## PCAT-286 users: give the BIOS a bit more patience
+
+With a real drive, the PCAT-286 can show "drive not ready" or "error on drive
+A" after the drive has been idle for a few seconds, for example right when you
+launch a game after typing the command. The drive is fine: its motor has
+stopped, and spinning it up again takes a little over a second, but the core's
+Mr. BIOS only waits about one second for the floppy before giving up.
+
+The fix is a tiny change to the BIOS, so it waits about 3 seconds instead.
+Mr. BIOS is commercial software, so I can't share a patched copy, but the
+[`tools/patch_mrbios_floppy.py`](tools/patch_mrbios_floppy.py) script makes one
+from your own `MR_BIOS_1.65_286_64K.ROM`:
+
+1. Copy the script next to your BIOS file (it needs Python 3) and run:
+
+   ```
+   python patch_mrbios_floppy.py MR_BIOS_1.65_286_64K.ROM
+   ```
+
+   It checks that the file is the right BIOS, then writes
+   `MR_BIOS_1.65_286_64K_floppy3s.ROM` next to it. Your original file stays as
+   it is.
+2. Put the new file in `games/PCAT-286` on your SD card and select it as the
+   BIOS in the PCAT-286 OSD.
+
+Only the floppy wait changes; everything else in the BIOS is the same. The one
+thing you'll notice is that "drive not ready" with an empty drive now takes
+3 seconds to appear instead of 1.
+
 ## Optional settings
 
 These go in the `[MiSTer]` section of your ini, or in a core's section:
