@@ -64,6 +64,9 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int unit_ok = 0;       // a drive answered on 'unit'
 	int unit_logged = 0;
 	int selected = 0, motor = 0;
+	int cur_cyl = -1;        // where the head is (-1 unknown)
+	double spin_waited = 0;  // ms waited for the motor since the last read_good
+	char rinfo[128] = "";    // the last read_track, for the log
 	int spin_ms = 0;         // motor spin-up time waited here (the firmware's own wait is set to 0), 0 = the firmware waits
 	double motor_t0 = 0;     // the motor was started at (ms)
 	int double_step = 0;
@@ -116,6 +119,7 @@ public:
 	void close() override;
 	int probe(int present, int changed, pfd_geometry *g, char *why, int whysz) override;
 	int read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t *st) override;
+	const char *read_info() override { return rinfo; }
 	int write_track(const pfd_geometry *g, int track, const uint8_t *buf, const uint8_t *dirty, const uint8_t *valid) override;
 	int keep_spinning(const pfd_geometry *g, int track) override;
 	void idle(double idle_ms) override;
@@ -338,7 +342,11 @@ void GwDrive::spin_wait()
 {
 	if (!motor || spin_ms <= 0) return;
 	double left = motor_t0 + spin_ms - pf_now_ms();
-	if (left > 0) usleep((useconds_t)(left * 1000));
+	if (left > 0)
+	{
+		usleep((useconds_t)(left * 1000));
+		spin_waited += left;
+	}
 }
 
 void GwDrive::motor_off()
@@ -355,7 +363,9 @@ void GwDrive::motor_off()
 int GwDrive::seek(int cyl)
 {
 	uint8_t c[3] = { GW_SEEK, 3, (uint8_t)(int8_t)cyl };
-	return cmd(c, 5000);
+	int r = cmd(c, 5000);
+	cur_cyl = r ? -1 : cyl;
+	return r;
 }
 
 int GwDrive::head(int h)
@@ -690,11 +700,18 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 	int ngot = 0;
 
 	secs.clear();
+	rinfo[0] = 0;
+	int was_on = motor;
 	if (motor_on()) return comm_error() ? PFD_NOT_READY : PFD_LOST;
-	int r = seek(double_step ? cyl * 2 : cyl);
+	int pcyl = double_step ? cyl * 2 : cyl, from = cur_cyl;
+	double ts = pf_now_ms();
+	int r = seek(pcyl);
+	double seek_ms = pf_now_ms() - ts;
 	if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 	if (r) return PFD_MEDIUM;
 	if (head(hd) < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	spin_waited = 0;
+	double tr = pf_now_ms();
 
 	// what went wrong, for the log when sectors are missing
 	int reads = 0, flux_err = 0, last_err = 0, decoded = 0, crc = 0, other_cyl = 0, seen_cyl = -1;
@@ -743,10 +760,11 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 		if (spt && ngot >= spt) break;
 		if (!spt && ngot) break;
 
-		// a bad sector being retried: not while the core waits for another sector,
-		// it gets what was read and the missing ones are read again later
+		// more reads (a bad sector, a track read ahead): not while the core waits
+		// for another sector, it gets what was read and the missing ones are read
+		// again later
 		int wc, wh, ws;
-		if (stopped && ngot && pf_core_wants(&wc, &wh, &ws) && (wc != cyl || wh != hd || (ws > 0 && ws < 64 && got[ws])))
+		if (stopped && pf_core_wants(&wc, &wh, &ws) && (wc != cyl || wh != hd || (ws > 0 && ws < 64 && got[ws])))
 		{
 			*stopped = 1;
 			break;
@@ -772,6 +790,15 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 		if (other_cyl) snprintf(why + strlen(why), sizeof(why) - strlen(why), ", %d sectors of cylinder %d", other_cyl, seen_cyl);
 		pf_log("cylinder %d head %d: %d of %d sectors in %d reads, %d sectors decoded%s", cyl, hd, ngot, spt, reads, decoded, why);
 	}
+
+	// for the log of a sector the core waited long for
+	int steps = from < 0 ? -1 : (pcyl > from ? pcyl - from : from - pcyl);
+	char sk[48];
+	if (steps < 0) snprintf(sk, sizeof(sk), "seek from ? %.0f ms", seek_ms);
+	else snprintf(sk, sizeof(sk), "seek %d cyl %.0f ms", steps, seek_ms);
+	snprintf(rinfo, sizeof(rinfo), "%s%s, then %.0f ms for the motor, %d read%s %.0f ms%s",
+		was_on ? "" : "motor started, ", sk, spin_waited, reads, reads == 1 ? "" : "s",
+		pf_now_ms() - tr - spin_waited, (stopped && *stopped) ? ", stopped for the core" : "");
 	return PFD_OK;
 }
 

@@ -66,6 +66,9 @@ public:
 
 	// how often the disk presence is checked when idle
 	virtual int poll_ms() { return 1000; }
+
+	// a few words on how the last read_track went (motor start, seek, reads), for the log
+	virtual const char *read_info() { return ""; }
 };
 
 PfDrive *pfd_usb_create();

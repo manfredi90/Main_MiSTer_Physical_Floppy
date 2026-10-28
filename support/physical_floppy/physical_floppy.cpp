@@ -93,6 +93,9 @@ static struct
 	int fill_logged;
 
 	uint32_t hits, misses, bad, lost_writes, written;
+	// the last track reads, for the log of a sector the core waited long for
+	struct { int chunk, ahead; double t0, t1; char info[128]; } hist[8];
+	int hist_n;
 	double last_call_ms;     // last request from the core
 	double last_access_ms;   // last read/write from the core (motor keep-alive)
 	double last_io_ms;       // last read/write on the drive
@@ -531,6 +534,7 @@ static void read_chunk(int chunk)
 	pfd_geometry g = pf.geom;
 	int first = chunk * g.spt;
 	int n = g.total - first;
+	int ahead = !(pf.want_lba >= first && pf.want_lba < first + g.spt);
 	pthread_mutex_unlock(&pf.lock);
 
 	if (n <= 0 || !pf.drv) return;
@@ -551,6 +555,14 @@ static void read_chunk(int chunk)
 
 	int bad[MAX_CHUNK], nbad = 0, later = 0;
 	pthread_mutex_lock(&pf.lock);
+	{
+		auto &h = pf.hist[pf.hist_n++ % 8];
+		h.chunk = chunk;
+		h.ahead = ahead;
+		h.t0 = t0;
+		h.t1 = t0 + dt;
+		snprintf(h.info, sizeof(h.info), "%s", pf.drv->read_info());
+	}
 	if (gen == pf.gen)
 	{
 		for (int i = 0; i < n; i++)
@@ -994,6 +1006,7 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 	int res;
 	double slow = 0;
 	uint32_t slow_track = 0;
+	static char why[700];
 	pthread_mutex_lock(&pf.lock);
 
 	if (!pf.media.present || (int)lba >= pf.media.total_sectors)
@@ -1021,7 +1034,23 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 		{
 			double w = now_ms() - pf.want_t0;
 			if (w > pf.worst_wait) pf.worst_wait = w;
-			if (w > SLOW_WAIT_MS) { slow = w; slow_track = lba / pf.media.spt; }
+			if (w > SLOW_WAIT_MS)
+			{
+				slow = w;
+				slow_track = lba / pf.media.spt;
+				// what the drive did meanwhile
+				why[0] = 0;
+				int k0 = pf.hist_n > 8 ? pf.hist_n - 8 : 0;
+				for (int k = k0; k < pf.hist_n; k++)
+				{
+					auto &h = pf.hist[k % 8];
+					if (h.t1 < pf.want_t0) continue;
+					size_t l = strlen(why);
+					snprintf(why + l, sizeof(why) - l, "\n    track %d%s %.0f ms%s%s%s", h.chunk,
+						h.ahead ? " (read ahead)" : "", h.t1 - h.t0, h.t0 < pf.want_t0 ? ", started before the request" : "",
+						h.info[0] ? ": " : "", h.info);
+				}
+			}
 			pf.want_lba = -1;
 		}
 		else pf.hits++;
@@ -1052,7 +1081,7 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 	pthread_cond_signal(&pf.cond);
 	pthread_mutex_unlock(&pf.lock);
 
-	if (slow > 0) plog("sector %u (track %u) waited %.0f ms for the drive", lba, slow_track, slow);
+	if (slow > 0) plog("sector %u (track %u) waited %.0f ms for the drive%s", lba, slow_track, slow, why);
 	return res;
 }
 
