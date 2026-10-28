@@ -64,6 +64,8 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int unit_ok = 0;       // a drive answered on 'unit'
 	int unit_logged = 0;
 	int selected = 0, motor = 0;
+	int spin_ms = 0;         // motor spin-up time waited here (the firmware's own wait is set to 0), 0 = the firmware waits
+	double motor_t0 = 0;     // the motor was started at (ms)
 	int double_step = 0;
 	int amiga = 0;           // AmigaDOS disks (11 sectors of 512 bytes per track) instead of PC disks
 	int mac = 0;             // Macintosh 400K/800K GCR disks (12 to 8 sectors per track by zone)
@@ -84,6 +86,7 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int get_pin(int pin);
 	int select(int on);
 	int motor_on();
+	void spin_wait();
 	void motor_off();
 	int seek(int cyl);
 	int head(int h);
@@ -281,35 +284,44 @@ int GwDrive::select(int on)
 	return 0;
 }
 
-// the time the firmware waits for the motor to spin up before acknowledging a
-// motor on (750 ms by default). The cores don't know the motor was off: a shorter
-// time answers the first sector sooner after a pause. MiSTer.ini
-// PFLOPPY_GW_MOTOR_MS sets it (0 = the firmware default)
+// the motor spin-up time (750 ms by default): the cores don't know the motor
+// was off, the first sector after a pause must come in time for the BIOS.
+// The firmware would wait for it before acknowledging the motor on, and only
+// then the head moves: here the firmware's wait is set to 0 and the spin-up
+// is waited before reading or writing (spin_wait), the head moving meanwhile
+// (a seek across the disk takes about half a second).
+// MiSTer.ini PFLOPPY_GW_MOTOR_MS sets the time (0 = the firmware's setting)
 void GwDrive::set_motor_delay()
 {
-	int ms = cfg.pfloppy_gw_motor_ms;
-	if (!ms) return;
-	if (ms < 100) ms = 100;
+	spin_ms = 0;
 
 	// delay parameters: select (us), step (us), seek settle (ms), motor (ms), ...
 	uint8_t get[4] = { GW_GET_PARAMS, 4, 0, 8 };
 	uint8_t d[8];
 	if (cmd(get) || rd(d, 8, 1000))
 	{
-		pf_log("Greaseweazle: cannot read the drive delays, motor spin-up left as it is");
+		pf_log("Greaseweazle: cannot read the drive delays, motor spin-up left to the Greaseweazle");
 		return;
 	}
-	int old = d[6] | (d[7] << 8);
-	if (old == ms) return;
+	int fw = d[6] | (d[7] << 8);
+	int ms = cfg.pfloppy_gw_motor_ms;
+	if (!ms) ms = fw;
+	else if (ms < 100) ms = 100;
+	if (!ms) return; // nothing to wait for
+
 	uint8_t set[11] = { GW_SET_PARAMS, 11, 0 };
 	memcpy(set + 3, d, 8);
-	set[3 + 6] = ms & 0xFF;
-	set[3 + 7] = ms >> 8;
-	if (cmd(set)) pf_log("Greaseweazle: cannot set the motor spin-up time");
-	else pf_log("Greaseweazle: motor spin-up %d ms (was %d)", ms, old);
+	set[3 + 6] = 0;
+	set[3 + 7] = 0;
+	if (cmd(set))
+	{
+		pf_log("Greaseweazle: cannot set the drive delays, motor spin-up left to the Greaseweazle");
+		return;
+	}
+	spin_ms = ms;
+	pf_log("Greaseweazle: motor spin-up %d ms%s, the head moves meanwhile", ms, ms == fw ? "" : " (MiSTer.ini PFLOPPY_GW_MOTOR_MS)");
 }
 
-// the firmware waits for the motor to spin up (set_motor_delay) before acknowledging
 int GwDrive::motor_on()
 {
 	if (select(1)) return -1;
@@ -317,7 +329,16 @@ int GwDrive::motor_on()
 	uint8_t c[4] = { GW_MOTOR, 4, (uint8_t)unit, 1 };
 	if (cmd(c, 5000)) return -1;
 	motor = 1;
+	motor_t0 = pf_now_ms();
 	return 0;
+}
+
+// before reading or writing: the motor is up to speed
+void GwDrive::spin_wait()
+{
+	if (!motor || spin_ms <= 0) return;
+	double left = motor_t0 + spin_ms - pf_now_ms();
+	if (left > 0) usleep((useconds_t)(left * 1000));
 }
 
 void GwDrive::motor_off()
@@ -357,6 +378,7 @@ int GwDrive::read_flux_cmd(uint32_t ticks_max, uint16_t max_index, std::vector<u
 {
 	if (idx_pos) idx_pos->clear();
 	if (idx_off) idx_off->clear();
+	spin_wait();
 	uint8_t c[8] = { GW_READ_FLUX, 8, (uint8_t)ticks_max, (uint8_t)(ticks_max >> 8), (uint8_t)(ticks_max >> 16), (uint8_t)(ticks_max >> 24),
 		(uint8_t)(max_index & 0xFF), (uint8_t)(max_index >> 8) };
 	int r = cmd(c);
@@ -644,6 +666,9 @@ void GwDrive::close()
 	if (fd >= 0)
 	{
 		motor_off();
+		// the firmware's own delays back (its motor spin-up was set to 0)
+		uint8_t reset[2] = { GW_RESET, 2 };
+		if (spin_ms) cmd(reset, 500);
 		::close(fd);
 	}
 	fd = -1;
@@ -1305,6 +1330,7 @@ int GwDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t 
 // returns ACK_* (ACK_WRPROT write-protected), -1 on a communication error
 int GwDrive::write_flux(const std::vector<uint32_t> &flux)
 {
+	spin_wait();
 	uint8_t c[4] = { GW_WRITE_FLUX, 4, 1, 1 }; // cue at index, terminate at index
 	int r = cmd(c);
 	if (r) return r;
