@@ -140,6 +140,7 @@ static const ini_var_t ini_vars[] =
 	{ "LOOKAHEAD", (void *)(&(cfg.lookahead)), UINT8, 0, 1 },
 	{ "MAIN", (void*)(&(cfg.main)), STRING, 0, sizeof(cfg.main) - 1 },
 	{ "PFLOPPY_PRELOAD", (void*)(&(cfg.pfloppy_preload)), UINT8, 0, 1 },
+	{ "PFLOPPY_LOG", (void*)(&(cfg.pfloppy_log)), UINT8, 0, 1 },
 	{ "PFLOPPY_DRIVE", (void*)(&(cfg.pfloppy_drive)), UINT8, 0, 2 },
 	{ "PFLOPPY_GW_DRIVE", (void*)(&(cfg.pfloppy_gw_drive)), UINT8, 0, 2 },
 	{ "PFLOPPY_GW_MOTOR_MS", (void*)(&(cfg.pfloppy_gw_motor_ms)), UINT16, 0, 2000 },

@@ -111,6 +111,7 @@ typedef struct {
 	uint8_t autofire_on_directions;
 	char screenshot_image_format[16];
 	uint8_t pfloppy_preload;
+	uint8_t pfloppy_log;
 	uint8_t pfloppy_drive;
 	uint8_t pfloppy_gw_drive;
 	uint16_t pfloppy_gw_motor_ms;

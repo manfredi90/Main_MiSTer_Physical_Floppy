@@ -18,6 +18,8 @@
 #include <time.h>
 #include <sys/stat.h>
 
+#include <string>
+
 #include "physical_floppy.h"
 #include "pf_drive.h"
 #include "../../file_io.h"
@@ -121,39 +123,67 @@ double pf_now_ms()
  * MiSTer (requests from the core), which must never wait for the SD card or
  * the serial console. A Minimig flux drive has only a few milliseconds of
  * flux buffered in the core: a log line written in place could empty it.
+ *
+ * Always in /tmp (memory). On the SD card (logs/pfloppy.log, readable from the
+ * network share) only with MiSTer.ini PFLOPPY_LOG=1, and in blocks: the lines
+ * are kept and appended at most every SD_LOG_FLUSH_MS, to spare the card.
  */
+#define SD_LOG_FLUSH_MS 5000
 static struct
 {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	int started;
 	int busy;
+	int flush_req;       // pf_log_flush: write the SD buffer now
 	char *q[256];        // NULL entry = log reset
 	int head, tail;      // q[head..tail)
 	uint32_t dropped;
-} lg = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, {}, 0, 0, 0 };
+} lg = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0, {}, 0, 0, 0 };
+
+// lines not on the SD card yet (log thread only)
+static std::string sd_buf;
+static double sd_last_flush = 0;
+
+static void sd_flush()
+{
+	sd_last_flush = pf_now_ms();
+	if (sd_buf.empty()) return;
+	FILE *f = fopen(SD_LOG_PATH, "a");
+	if (f)
+	{
+		fwrite(sd_buf.data(), 1, sd_buf.size(), f);
+		fclose(f);
+	}
+	sd_buf.clear();
+}
 
 static void log_write(const char *line)
 {
 	if (!line)
 	{
-		// the log of the previous core session is kept as pfloppy_prev.log
 		remove(LOG_PATH);
-		if (!access("/media/fat", F_OK)) mkdir(SD_LOG_DIR, 0755);
-		rename(SD_LOG_PATH, SD_PREV_LOG_PATH);
+		if (cfg.pfloppy_log)
+		{
+			// the log of the previous core session is kept as pfloppy_prev.log
+			sd_flush();
+			if (!access("/media/fat", F_OK)) mkdir(SD_LOG_DIR, 0755);
+			rename(SD_LOG_PATH, SD_PREV_LOG_PATH);
+		}
 		return;
 	}
 	printf("PFLOPPY: %s\n", line + 13);
-	// /tmp, and a copy on the SD card (readable from the network share)
-	const char *paths[2] = { LOG_PATH, SD_LOG_PATH };
-	for (int i = 0; i < 2; i++)
+	FILE *f = fopen(LOG_PATH, "a");
+	if (f)
 	{
-		FILE *f = fopen(paths[i], "a");
-		if (f)
-		{
-			fprintf(f, "%s\n", line);
-			fclose(f);
-		}
+		fprintf(f, "%s\n", line);
+		fclose(f);
+	}
+	if (cfg.pfloppy_log)
+	{
+		sd_buf += line;
+		sd_buf += '\n';
+		if (sd_buf.size() > 16384 || pf_now_ms() - sd_last_flush >= SD_LOG_FLUSH_MS) sd_flush();
 	}
 }
 
@@ -162,7 +192,33 @@ static void *log_thread(void *)
 	pthread_mutex_lock(&lg.lock);
 	for (;;)
 	{
-		while (lg.head == lg.tail) pthread_cond_wait(&lg.cond, &lg.lock);
+		while (lg.head == lg.tail)
+		{
+			if (lg.flush_req || (!sd_buf.empty() && pf_now_ms() - sd_last_flush >= SD_LOG_FLUSH_MS))
+			{
+				lg.busy = 1;
+				pthread_mutex_unlock(&lg.lock);
+				sd_flush();
+				pthread_mutex_lock(&lg.lock);
+				lg.busy = 0;
+				lg.flush_req = 0;
+				pthread_cond_broadcast(&lg.cond);
+				continue;
+			}
+			if (sd_buf.empty()) pthread_cond_wait(&lg.cond, &lg.lock);
+			else
+			{
+				// the buffered lines go to the SD card when the flush time comes
+				double due = sd_last_flush + SD_LOG_FLUSH_MS - pf_now_ms();
+				if (due < 1) due = 1;
+				struct timespec ts;
+				clock_gettime(CLOCK_REALTIME, &ts);
+				long long ns = ts.tv_nsec + (long long)(due * 1e6);
+				ts.tv_sec += ns / 1000000000;
+				ts.tv_nsec = ns % 1000000000;
+				pthread_cond_timedwait(&lg.cond, &lg.lock, &ts);
+			}
+		}
 		char *line = lg.q[lg.head % 256];
 		lg.head++;
 		lg.busy = 1;
@@ -233,11 +289,17 @@ void pf_log_reset()
 	log_push(NULL);
 }
 
-// waits until everything logged so far is written (tests)
+// waits until everything logged so far is written, on the SD card too (tests)
 void pf_log_flush()
 {
 	pthread_mutex_lock(&lg.lock);
 	while (lg.started && (lg.head != lg.tail || lg.busy)) pthread_cond_wait(&lg.cond, &lg.lock);
+	if (lg.started)
+	{
+		lg.flush_req = 1;
+		pthread_cond_broadcast(&lg.cond);
+		while (lg.flush_req || lg.busy) pthread_cond_wait(&lg.cond, &lg.lock);
+	}
 	pthread_mutex_unlock(&lg.lock);
 }
 
