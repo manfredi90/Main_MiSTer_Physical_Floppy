@@ -177,8 +177,16 @@ in Zaparoo instead of relying on auto detection.)
 
 ## If something goes wrong
 
+**Disks that suddenly won't load?** Before anything else, check the power.
+Floppy drives are hungry, and a weak power supply or a poor USB cable can
+mess up the reading even when the drive seems to spin just fine (I lost a
+morning to this, with games that worked the day before). Try a different
+power supply or USB power cable, or connect the drive through a powered USB
+hub.
+
 Everything the drive does ends up in `logs/pfloppy.log` on your SD card:
 which drive was found, which disk went in, read and write errors and so on.
+The log of the previous core you ran is kept as `logs/pfloppy_prev.log`.
 It's the first place to look, and please attach it if you open an issue.
 
 ## Building
