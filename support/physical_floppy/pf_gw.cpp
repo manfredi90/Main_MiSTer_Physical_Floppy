@@ -52,6 +52,7 @@ enum { ACK_OKAY = 0, ACK_BAD_COMMAND = 1, ACK_NO_INDEX = 2, ACK_FLUX_OVERFLOW = 
 
 #define BUS_IBMPC 1
 #define READ_ATTEMPTS 3
+#define READ_ATTEMPTS_CRC 5   // sectors still missing with CRC errors: a weak sector, a few more tries
 
 class GwDrive : public PfDrive, public PfFluxDrive
 {
@@ -671,7 +672,7 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 	int reads = 0, flux_err = 0, last_err = 0, decoded = 0, crc = 0, other_cyl = 0, seen_cyl = -1;
 	int recal = 0, extra = 0;
 
-	for (int attempt = 0; attempt < READ_ATTEMPTS + extra; attempt++)
+	for (int attempt = 0; attempt < ((crc && spt) ? READ_ATTEMPTS_CRC : READ_ATTEMPTS) + extra; attempt++)
 	{
 		reads++;
 		if (gcr())
