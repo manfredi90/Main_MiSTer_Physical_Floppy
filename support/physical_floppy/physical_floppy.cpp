@@ -26,6 +26,7 @@
 #define LOG_PATH          "/tmp/pfloppy.log"
 #define SD_LOG_DIR        "/media/fat/logs"
 #define SD_LOG_PATH       SD_LOG_DIR "/pfloppy.log"
+#define SD_PREV_LOG_PATH  SD_LOG_DIR "/pfloppy_prev.log"
 #define MAX_SECTORS       5760   // 2.88MB
 #define MAX_SPT           36
 #define MAX_CHUNK         MAX_SPT // reads are done one track at a time
@@ -136,9 +137,10 @@ static void log_write(const char *line)
 {
 	if (!line)
 	{
+		// the log of the previous core session is kept as pfloppy_prev.log
 		remove(LOG_PATH);
 		if (!access("/media/fat", F_OK)) mkdir(SD_LOG_DIR, 0755);
-		remove(SD_LOG_PATH);
+		rename(SD_LOG_PATH, SD_PREV_LOG_PATH);
 		return;
 	}
 	printf("PFLOPPY: %s\n", line + 13);
