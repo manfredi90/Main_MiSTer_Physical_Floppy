@@ -176,6 +176,7 @@ These go in the `[MiSTer]` section of your ini, or in a core's section:
 | `PFLOPPY_GW_DRIVE=1` or `2` | The drive is on the Greaseweazle's A or B connector |
 | `PFLOPPY_GW_MOTOR_MS=500` | How long the Greaseweazle waits for the drive motor to spin up, in milliseconds (default: the Greaseweazle's own 750). Lower means the drive answers sooner after a pause; don't go so low that your drive misreads right after starting. |
 | `PFLOPPY_PRELOAD=1` | PC cores: read the whole disk in the background as soon as it goes in. Can help when a program gives up because the drive is too slow. Off by default, so the drive only reads what's needed, like a real one. |
+| `PFLOPPY_LOG=1` | Write a log of what the drive does to `logs/pfloppy.log` on the SD card (see below). Off by default. |
 
 ## Zaparoo users
 
@@ -212,12 +213,17 @@ Floppy drives are hungry, and a weak power supply or a poor USB cable can
 mess up the reading even when the drive seems to spin just fine (I lost a
 morning to this, with games that worked the day before). Try a different
 power supply or USB power cable, or connect the drive through a powered USB
-hub.
+hub. The typical signs: the head makes strange noises, disks load only some
+of the time, and the heavier cores (ao486, z486) fail more often than the
+others. If the log says "missed steps: check the drive's power supply", that's
+it.
 
-Everything the drive does ends up in `logs/pfloppy.log` on your SD card:
-which drive was found, which disk went in, read and write errors and so on.
-The log of the previous core you ran is kept as `logs/pfloppy_prev.log`.
-It's the first place to look, and please attach it if you open an issue.
+For a closer look, turn on the log: add `PFLOPPY_LOG=1` to the `[MiSTer]`
+section of your ini. Everything the drive does then ends up in
+`logs/pfloppy.log` on your SD card: which drive was found, which disk went in,
+read and write errors and so on, and the log of the previous core you ran is
+kept as `logs/pfloppy_prev.log`. It's off by default so the SD card isn't
+written for nothing. Please attach it if you open an issue.
 
 ## Building
 
