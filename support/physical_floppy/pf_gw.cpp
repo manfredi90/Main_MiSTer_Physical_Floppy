@@ -720,7 +720,7 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 		if (!ngot && other_cyl && !recal && !double_step)
 		{
 			recal = 1;
-			pf_log("cylinder %d: the head is on cylinder %d, recalibrating", cyl, seen_cyl);
+			pf_log("cylinder %d: the head is on cylinder %d (missed steps: check the drive's power supply), recalibrating", cyl, seen_cyl);
 			if (seek(0) < 0 || seek(cyl) < 0 || head(hd) < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 			attempt = -1;
 		}
