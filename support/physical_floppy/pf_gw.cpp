@@ -667,8 +667,13 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 	if (r) return PFD_MEDIUM;
 	if (head(hd) < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 
-	for (int attempt = 0; attempt < READ_ATTEMPTS; attempt++)
+	// what went wrong, for the log when sectors are missing
+	int reads = 0, flux_err = 0, last_err = 0, decoded = 0, crc = 0, other_cyl = 0, seen_cyl = -1;
+	int recal = 0, extra = 0;
+
+	for (int attempt = 0; attempt < READ_ATTEMPTS + extra; attempt++)
 	{
+		reads++;
 		if (gcr())
 		{
 			// Mac GCR tracks are not written from the index pulse: read from where
@@ -683,13 +688,24 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 		else r = read_flux(1, flux);
 		if (r < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 		if (r == ACK_NO_INDEX) return PFD_CHANGED; // no rotation: disk removed
-		if (r) continue;                           // overflow etc: read again
+		if (r)
+		{
+			// flux overflow etc (the stream was not read fast enough): read again,
+			// a few more times than for bad sectors
+			flux_err++;
+			last_err = r;
+			if (extra < READ_ATTEMPTS) extra++;
+			continue;
+		}
 
 		decode(flux, cyl, out);
 		for (auto &s : out)
 		{
-			if (!s.ok || s.n != 2 || s.sec < 1 || s.sec > 63) continue;
-			if (s.cyl != cyl || (heads > 1 && s.head != hd)) continue;
+			decoded++;
+			if (!s.ok) { crc++; continue; }
+			if (s.n != 2 || s.sec < 1 || s.sec > 63) continue;
+			if (s.cyl != cyl) { other_cyl++; seen_cyl = s.cyl; continue; }
+			if (heads > 1 && s.head != hd) continue;
 			if (got[s.sec]) continue;
 			got[s.sec] = 1;
 			ngot++;
@@ -697,6 +713,26 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 		}
 		if (spt && ngot >= spt) break;
 		if (!spt && ngot) break;
+
+		// only sectors of another cylinder: the head lost its position (missed
+		// steps). Recalibrate on track 0 and seek again, once
+		if (!ngot && other_cyl && !recal && !double_step)
+		{
+			recal = 1;
+			pf_log("cylinder %d: the head is on cylinder %d, recalibrating", cyl, seen_cyl);
+			if (seek(0) < 0 || seek(cyl) < 0 || head(hd) < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+			attempt = -1;
+		}
+	}
+
+	// sectors missing: why (not for an empty track, like the second side of a single sided disk)
+	if (spt && ngot < spt && (ngot || decoded || flux_err))
+	{
+		char why[128] = "";
+		if (flux_err) snprintf(why + strlen(why), sizeof(why) - strlen(why), ", %d flux errors (code %d)", flux_err, last_err);
+		if (crc) snprintf(why + strlen(why), sizeof(why) - strlen(why), ", %d CRC errors", crc);
+		if (other_cyl) snprintf(why + strlen(why), sizeof(why) - strlen(why), ", %d sectors of cylinder %d", other_cyl, seen_cyl);
+		pf_log("cylinder %d head %d: %d of %d sectors in %d reads, %d sectors decoded%s", cyl, hd, ngot, spt, reads, decoded, why);
 	}
 	return PFD_OK;
 }
