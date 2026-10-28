@@ -205,6 +205,11 @@ in Zaparoo instead of relying on auto detection.)
   example *Desert Dream* by Kefrens). They work in AmigaDOS mode, or from an
   ADF.
 - **Mac disks** are read only, and slow to load (see above).
+- **Not every PC drive reads Mac disks well.** Mac disks are recorded in a
+  way PC drives weren't made for, and some drives struggle with the inner
+  tracks (cylinders 48 to 79): the log then shows lots of bad sectors there,
+  and the disk takes much longer to load. If that happens, try another drive:
+  the same disk may read perfectly.
 
 ## If something goes wrong
 
@@ -217,6 +222,10 @@ hub. The typical signs: the head makes strange noises, disks load only some
 of the time, and the heavier cores (ao486, z486) fail more often than the
 others. If the log says "missed steps: check the drive's power supply", that's
 it.
+
+**Still errors with good power?** The drive itself may be worn out: an old
+drive can start missing steps or misreading one side, and then die. If
+several disks fail in the same place, try another drive.
 
 For a closer look, turn on the log: add `PFLOPPY_LOG=1` to the `[MiSTer]`
 section of your ini. Everything the drive does then ends up in
