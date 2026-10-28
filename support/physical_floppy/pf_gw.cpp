@@ -99,7 +99,7 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int write_flux(const std::vector<uint32_t> &flux);
 	void check_port_users(int always);
 	int detect(pfd_geometry *g, char *why, int whysz);
-	int read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs);
+	int read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs, int *stopped = NULL);
 
 	void decode(const std::vector<uint32_t> &flux, int cyl, std::vector<mfm_sector> &out);
 	int detect_amiga(pfd_geometry *g, char *why, int whysz);
@@ -654,8 +654,11 @@ void GwDrive::close()
 /* ------------------------------------------------------------------ disk */
 
 // reads one track and collects its good sectors (a few attempts for weak sectors)
-int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs)
+// stopped (optional): set to 1 if the reads stopped early, sectors still missing,
+// because the core waits for a sector of another track (or one already read)
+int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs, int *stopped)
 {
+	if (stopped) *stopped = 0;
 	std::vector<uint32_t> flux;
 	std::vector<mfm_sector> out;
 	uint8_t got[64] = {};
@@ -715,6 +718,15 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 		if (spt && ngot >= spt) break;
 		if (!spt && ngot) break;
 
+		// a bad sector being retried: not while the core waits for another sector,
+		// it gets what was read and the missing ones are read again later
+		int wc, wh, ws;
+		if (stopped && ngot && pf_core_wants(&wc, &wh, &ws) && (wc != cyl || wh != hd || (ws > 0 && ws < 64 && got[ws])))
+		{
+			*stopped = 1;
+			break;
+		}
+
 		// only sectors of another cylinder: the head lost its position (missed
 		// steps). Recalibrate on track 0 and seek again, once
 		if (!ngot && other_cyl && !recal && !double_step)
@@ -727,7 +739,7 @@ int GwDrive::read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sect
 	}
 
 	// sectors missing: why (not for an empty track, like the second side of a single sided disk)
-	if (spt && ngot < spt && (ngot || decoded || flux_err))
+	if (spt && ngot < spt && (ngot || decoded || flux_err) && !(stopped && *stopped))
 	{
 		char why[128] = "";
 		if (flux_err) snprintf(why + strlen(why), sizeof(why) - strlen(why), ", %d flux errors (code %d)", flux_err, last_err);
@@ -1273,11 +1285,12 @@ int GwDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t 
 	// Mac: the sectors of this zone; the other slots of the track are unused
 	int spt = gcr() ? mac_spt(cyl) : g->spt;
 	std::vector<mfm_sector> secs;
-	int r = read_good(cyl, hd, g->heads, spt, secs);
+	int stopped = 0;
+	int r = read_good(cyl, hd, g->heads, spt, secs, &stopped);
 	if (r != PFD_OK) return r;
 
 	memset(st, 1, g->spt);
-	memset(st, 2, spt);
+	memset(st, stopped ? PFD_ST_LATER : 2, spt);
 	memset(buf, 0, g->spt * 512);
 	for (auto &s : secs)
 	{

@@ -114,6 +114,12 @@ void pf_calc_geometry(int total, int *spt, int *heads, int *cyl);
 void pf_log_reset();  // new log file (when a drive is attached)
 void pf_log_flush();  // waits until the log is written
 
+// the sector the core is waiting for (logical cylinder, head, sector 1..),
+// 0 if none: a drive retrying a bad sector stops when the core waits for
+// something else (read_track then marks the missing sectors PFD_ST_LATER)
+int pf_core_wants(int *cyl, int *head, int *sec);
+#define PFD_ST_LATER 3   // read_track st[]: not read, try again later (1 = good, 2 = bad)
+
 #define PF_MOTOR_KEEP_MS 3000  // motor-off delay after the last access from the core
 
 #endif

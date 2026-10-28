@@ -506,6 +506,21 @@ static int handle_result(int r, const char *what)
 
 // reads one track. A track (not a whole cylinder) keeps the time a new
 // request from the core may have to wait for the drive short.
+int pf_core_wants(int *cyl, int *head, int *sec)
+{
+	pthread_mutex_lock(&pf.lock);
+	int lba = pf.want_lba;
+	pfd_geometry g = pf.geom;
+	int ok = lba >= 0 && pf.media.present && lba < pf.media.total_sectors && pf.state[lba] == ST_INVALID;
+	pthread_mutex_unlock(&pf.lock);
+	if (!ok || g.spt <= 0 || g.heads <= 0) return 0;
+	int track = lba / g.spt;
+	*sec = lba % g.spt + 1;
+	*cyl = track / g.heads;
+	*head = track % g.heads;
+	return 1;
+}
+
 static void read_chunk(int chunk)
 {
 	static uint8_t buf[MAX_CHUNK * 512];
@@ -534,7 +549,7 @@ static void read_chunk(int chunk)
 		memset(st, 2, sizeof(st));
 	}
 
-	int bad[MAX_CHUNK], nbad = 0;
+	int bad[MAX_CHUNK], nbad = 0, later = 0;
 	pthread_mutex_lock(&pf.lock);
 	if (gen == pf.gen)
 	{
@@ -545,6 +560,11 @@ static void read_chunk(int chunk)
 			{
 				memcpy(pf.data + (first + i) * 512, buf + i * 512, 512);
 				pf.state[first + i] = ST_VALID;
+			}
+			else if (st[i] == PFD_ST_LATER)
+			{
+				// the drive stopped retrying it for the core: read again later
+				later++;
 			}
 			else
 			{
@@ -561,6 +581,7 @@ static void read_chunk(int chunk)
 		int s = bad[i];
 		plog("bad sector %d (C/H/S %d/%d/%d), the core gets zeros", s, s / (g.spt * g.heads), (s / g.spt) % g.heads, s % g.spt + 1);
 	}
+	if (later) plog("track %d: %d sector(s) to read again later, the core was waiting for another one", chunk, later);
 	if (dt > 2500) plog("slow read: track %d took %.0f ms", chunk, dt);
 }
 
