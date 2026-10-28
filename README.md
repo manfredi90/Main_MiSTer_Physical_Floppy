@@ -145,6 +145,7 @@ These go in the `[MiSTer]` section of your ini, or in a core's section:
 | `PFLOPPY_DRIVE=2` | Greaseweazle only |
 | `PFLOPPY_GW_DRIVE=0` | Find the drive on the Greaseweazle automatically (default) |
 | `PFLOPPY_GW_DRIVE=1` or `2` | The drive is on the Greaseweazle's A or B connector |
+| `PFLOPPY_GW_MOTOR_MS=500` | How long the Greaseweazle waits for the drive motor to spin up, in milliseconds (default: the Greaseweazle's own 750). Lower means the drive answers sooner after a pause; don't go so low that your drive misreads right after starting. |
 | `PFLOPPY_PRELOAD=1` | PC cores: read the whole disk in the background as soon as it goes in. Can help when a program gives up because the drive is too slow. Off by default, so the drive only reads what's needed, like a real one. |
 
 ## Zaparoo users

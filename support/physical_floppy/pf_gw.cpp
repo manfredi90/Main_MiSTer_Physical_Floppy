@@ -42,7 +42,7 @@ int gw_read_sys(const char *path, char *out, int sz);
 // commands
 enum
 {
-	GW_GET_INFO = 0, GW_SEEK = 2, GW_HEAD = 3, GW_MOTOR = 6, GW_READ_FLUX = 7, GW_WRITE_FLUX = 8,
+	GW_GET_INFO = 0, GW_SET_PARAMS = 4, GW_GET_PARAMS = 5, GW_SEEK = 2, GW_HEAD = 3, GW_MOTOR = 6, GW_READ_FLUX = 7, GW_WRITE_FLUX = 8,
 	GW_GET_FLUX_STATUS = 9, GW_SELECT = 12, GW_DESELECT = 13, GW_SET_BUS_TYPE = 14,
 	GW_RESET = 16, GW_GET_PIN = 20, GW_NOCLICK_STEP = 22
 };
@@ -91,6 +91,7 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int splice_rev(const std::vector<uint32_t> &flux, const std::vector<double> &t, double a, pfd_rev &rv);
 	int check_disk(int *was_changed);
 	int find(char *out, int sz);
+	void set_motor_delay();
 	int find_unit();
 	int resync();
 	int comm_error();
@@ -279,7 +280,35 @@ int GwDrive::select(int on)
 	return 0;
 }
 
-// the firmware waits for the motor to spin up (750 ms) before acknowledging
+// the time the firmware waits for the motor to spin up before acknowledging a
+// motor on (750 ms by default). The cores don't know the motor was off: a shorter
+// time answers the first sector sooner after a pause. MiSTer.ini
+// PFLOPPY_GW_MOTOR_MS sets it (0 = the firmware default)
+void GwDrive::set_motor_delay()
+{
+	int ms = cfg.pfloppy_gw_motor_ms;
+	if (!ms) return;
+	if (ms < 100) ms = 100;
+
+	// delay parameters: select (us), step (us), seek settle (ms), motor (ms), ...
+	uint8_t get[4] = { GW_GET_PARAMS, 4, 0, 8 };
+	uint8_t d[8];
+	if (cmd(get) || rd(d, 8, 1000))
+	{
+		pf_log("Greaseweazle: cannot read the drive delays, motor spin-up left as it is");
+		return;
+	}
+	int old = d[6] | (d[7] << 8);
+	if (old == ms) return;
+	uint8_t set[11] = { GW_SET_PARAMS, 11, 0 };
+	memcpy(set + 3, d, 8);
+	set[3 + 6] = ms & 0xFF;
+	set[3 + 7] = ms >> 8;
+	if (cmd(set)) pf_log("Greaseweazle: cannot set the motor spin-up time");
+	else pf_log("Greaseweazle: motor spin-up %d ms (was %d)", ms, old);
+}
+
+// the firmware waits for the motor to spin up (set_motor_delay) before acknowledging
 int GwDrive::motor_on()
 {
 	if (select(1)) return -1;
@@ -594,6 +623,7 @@ int GwDrive::open(char *desc, int descsz)
 		close();
 		return 0;
 	}
+	set_motor_delay();
 
 	// MiSTer.ini PFLOPPY_GW_DRIVE: 0 = automatic, 1 = drive A (after the cable twist), 2 = drive B
 	unit = cfg.pfloppy_gw_drive == 2 ? 1 : 0;
