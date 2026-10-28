@@ -101,6 +101,9 @@ you pick the special file described below.
 
    When you load one of these cores the MiSTer switches to this Main by
    itself, and goes back to the normal one for every other core.
+   If a core's section already has settings, put the `main=` line right
+   under the core's name: lines after a `[video=...]` line are only read in
+   that video mode, so the core would start with the normal Main.
 3. Plug in your drive and start the core.
 
 ## How to use it
