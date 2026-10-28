@@ -1337,8 +1337,12 @@ int GwDrive::read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t 
 	// Mac: the sectors of this zone; the other slots of the track are unused
 	int spt = gcr() ? mac_spt(cyl) : g->spt;
 	std::vector<mfm_sector> secs;
+	// the retries of a bad sector give way when the core waits for another one
+	// (a BIOS gives up after a second or two). Not for the Mac: the core loads
+	// the whole disk in order, without a timeout, and the track would be read
+	// again from the start
 	int stopped = 0;
-	int r = read_good(cyl, hd, g->heads, spt, secs, &stopped);
+	int r = read_good(cyl, hd, g->heads, spt, secs, mac ? NULL : &stopped);
 	if (r != PFD_OK) return r;
 
 	memset(st, 1, g->spt);
