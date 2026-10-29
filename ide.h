@@ -31,6 +31,8 @@
 #define IDE_STATE_WAIT_PKT_RD   4
 #define IDE_STATE_WAIT_PKT_END  5
 #define IDE_STATE_WAIT_PKT_MODE 6
+#define IDE_STATE_WAIT_RD       7   // ATA PIO read: next block is ready, waiting for the core
+#define IDE_STATE_WAIT_WR       8   // ATA PIO write: waiting for the core to supply the next block
 
 struct regs_t
 {
@@ -122,6 +124,14 @@ struct ide_config
 	uint32_t null;
 	uint32_t prepcnt;
 	regs_t   regs;
+
+	// ATA PIO transfer in progress (IDE_STATE_WAIT_RD/WR). The transfer runs
+	// one block per request so the main loop, and with it the other channel,
+	// keeps being serviced between blocks.
+	uint32_t xfer_lba;
+	uint16_t xfer_cnt;
+	uint8_t  xfer_multi;
+	uint8_t  xfer_irq;
 
 	drive_t drive[2];
 };
