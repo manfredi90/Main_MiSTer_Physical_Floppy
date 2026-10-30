@@ -52,6 +52,12 @@
 #define WRITE_RETRIES     3
 #define WRITE_SETTLE_MS   300    // a track being written (the Amiga sends its sectors one by one
                                  // over a revolution) is written to the disk once complete
+// the changed sectors are written to the disk when the core has been quiet (no
+// writes, no sector to wait for) this long: a track being written keeps the drive
+// busy for most of a second, a sector the core asks for meanwhile would wait.
+// Written anyway after FLUSH_MAX_MS (a program that never stops)
+#define FLUSH_IDLE_MS     1000
+#define FLUSH_MAX_MS      5000
 
 enum { ST_INVALID = 0, ST_VALID = 1, ST_BAD = 2 };
 
@@ -102,6 +108,8 @@ static struct
 	double last_keep_ms;     // last keep-alive command
 	double worst_wait;
 	double last_stats;
+	double dirty_t0;         // the oldest change not written yet, since
+	double last_miss_ms;     // the core was last waiting for a sector
 } pf = {
 	PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0,
 	-1, NULL, NULL, NULL, "", "",
@@ -370,6 +378,8 @@ static void reset_cache()
 		pf.lost_writes += pf.dirty_count;
 		plog("WARNING: %d written sectors were not saved to the disk (disk removed/changed)", pf.dirty_count);
 	}
+	int unv = pf.drv ? pf.drv->drop_unverified() : 0;
+	if (unv) plog("WARNING: %d track(s) written but not checked (disk removed/changed)", unv);
 	memset(pf.state, ST_INVALID, sizeof(pf.state));
 	memset(pf.dirty, 0, sizeof(pf.dirty));
 	memset(pf.wretry, 0, sizeof(pf.wretry));
@@ -601,8 +611,16 @@ static void read_chunk(int chunk)
 // first track with changed sectors that can be written now (lock held): not the
 // one the core is still writing, unless it is complete or the core stopped.
 // force: any. returns its first sector, -1 none
+// the core has not written nor waited for a sector for a while (lock held)
+static int core_quiet()
+{
+	double t = now_ms();
+	return pf.want_lba < 0 && t - pf.last_write_ms >= FLUSH_IDLE_MS && t - pf.last_miss_ms >= FLUSH_IDLE_MS;
+}
+
 static int flush_pick(int force)
 {
+	if (!force && !core_quiet() && now_ms() - pf.dirty_t0 < FLUSH_MAX_MS) return -1;
 	int spt = pf.media.spt;
 	int busy = !force && now_ms() - pf.last_write_ms < WRITE_SETTLE_MS ? pf.last_write_track : -1;
 	for (int i = 0; i < pf.media.total_sectors; i++)
@@ -725,6 +743,14 @@ static int flush_one(int force)
 	return 1;
 }
 
+// checks a track written earlier (the check was left for later while the core waited)
+static void verify_one()
+{
+	int r = pf.drv->verify_one();
+	pf.last_io_ms = now_ms();
+	handle_result(r, "check failed");
+}
+
 static void write_stats()
 {
 	double t = now_ms();
@@ -785,6 +811,10 @@ static void *worker(void *)
 			else if (pf.dirty_count && flush_pick(0) >= 0)
 			{
 				flush = 1;
+			}
+			else if (pf.drv->unverified() && core_quiet())
+			{
+				flush = 2; // check a track written earlier
 			}
 			else
 			{
@@ -875,12 +905,17 @@ static void *worker(void *)
 		pthread_mutex_unlock(&pf.lock);
 
 		if (chunk >= 0) read_chunk(chunk);
+		else if (flush == 2) verify_one();
 		else flush_one(0);
 	}
 
-	// flush pending writes before leaving
+	// flush pending writes before leaving, and check them
 	double t0 = now_ms();
-	while (pf.drv && pf.dirty_count && now_ms() - t0 < 5000) flush_one(1);
+	while (pf.drv && (pf.dirty_count || pf.drv->unverified()) && now_ms() - t0 < 5000)
+	{
+		if (pf.dirty_count) flush_one(1);
+		else verify_one();
+	}
 
 	return NULL;
 }
@@ -1032,6 +1067,7 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 		memcpy(buf, pf.data + lba * 512, 512);
 		if (pf.want_lba == (int)lba)
 		{
+			pf.last_miss_ms = now_ms(); // the core was waiting until now
 			double w = now_ms() - pf.want_t0;
 			if (w > pf.worst_wait) pf.worst_wait = w;
 			if (w > SLOW_WAIT_MS)
@@ -1073,6 +1109,7 @@ int pfloppy_read(uint32_t lba, uint8_t *buf)
 		{
 			pf.want_lba = lba;
 			pf.want_t0 = now_ms();
+			pf.last_miss_ms = pf.want_t0;
 			pf.misses++;
 		}
 		res = 0;
@@ -1105,6 +1142,7 @@ int pfloppy_write(uint32_t lba, const uint8_t *buf, uint32_t cnt)
 		pf.wretry[lba + i] = 0;
 		if (!pf.dirty[lba + i])
 		{
+			if (!pf.dirty_count) pf.dirty_t0 = pf.last_write_ms;
 			pf.dirty[lba + i] = 1;
 			pf.dirty_count++;
 		}

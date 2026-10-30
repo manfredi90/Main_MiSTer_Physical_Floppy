@@ -69,6 +69,14 @@ public:
 
 	// a few words on how the last read_track went (motor start, seek, reads), for the log
 	virtual const char *read_info() { return ""; }
+
+	// tracks written but not checked yet (a drive that rereads what it wrote
+	// leaves the check for later when the core is waiting for a sector):
+	// how many, check one (PFD_* result; a failed check writes it again),
+	// forget them (the disk was changed or removed)
+	virtual int unverified() { return 0; }
+	virtual int verify_one() { return PFD_OK; }
+	virtual int drop_unverified() { return 0; }
 };
 
 PfDrive *pfd_usb_create();

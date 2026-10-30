@@ -107,6 +107,13 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int detect(pfd_geometry *g, char *why, int whysz);
 	int read_good(int cyl, int hd, int heads, int spt, std::vector<mfm_sector> &secs, int *stopped = NULL);
 
+	// tracks written, the check (reading them back) left for later because the
+	// core was waiting for a sector: the drive is free for it sooner
+	struct unchecked { int track, cyl, hd, heads, spt, tries; std::vector<uint8_t> data; };
+	std::vector<unchecked> later;
+	int write_data(int track, int cyl, int hd, int heads, int spt, const uint8_t *data, int tries);
+	int check_track(int cyl, int hd, int heads, int spt, const uint8_t *data, int *ok, int *stopped);
+
 	void decode(const std::vector<uint32_t> &flux, int cyl, std::vector<mfm_sector> &out);
 	int detect_amiga(pfd_geometry *g, char *why, int whysz);
 	int detect_mac(pfd_geometry *g, char *why, int whysz);
@@ -120,6 +127,9 @@ public:
 	int probe(int present, int changed, pfd_geometry *g, char *why, int whysz) override;
 	int read_track(const pfd_geometry *g, int track, uint8_t *buf, uint8_t *st) override;
 	const char *read_info() override { return rinfo; }
+	int unverified() override { return (int)later.size(); }
+	int verify_one() override;
+	int drop_unverified() override { int n = (int)later.size(); later.clear(); return n; }
 	int write_track(const pfd_geometry *g, int track, const uint8_t *buf, const uint8_t *dirty, const uint8_t *valid) override;
 	int keep_spinning(const pfd_geometry *g, int track) override;
 	void idle(double idle_ms) override;
@@ -1437,6 +1447,16 @@ int GwDrive::write_track(const pfd_geometry *g, int track, const uint8_t *buf, c
 		else missing++;
 	}
 
+	// a write of this track not checked yet: its data is what the disk should hold
+	for (auto it = later.begin(); it != later.end(); ++it)
+	{
+		if (it->track != track) continue;
+		for (int i = 0; i < spt && i < it->spt; i++)
+			if (!have[i]) { memcpy(data + i * 512, it->data.data() + i * 512, 512); have[i] = 1; missing--; }
+		later.erase(it); // written again now: this write is checked instead
+		break;
+	}
+
 	std::vector<mfm_sector> secs;
 	if (missing)
 	{
@@ -1457,6 +1477,29 @@ int GwDrive::write_track(const pfd_geometry *g, int track, const uint8_t *buf, c
 		}
 	}
 
+	return write_data(track, cyl, hd, g->heads, spt, data, 0);
+}
+
+// reads back a track written: ok = sectors equal to data; stopped (optional):
+// the reads stopped because the core waits for a sector (ok not complete)
+int GwDrive::check_track(int cyl, int hd, int heads, int spt, const uint8_t *data, int *ok, int *stopped)
+{
+	std::vector<mfm_sector> secs;
+	*ok = 0;
+	int r = read_good(cyl, hd, heads, spt, secs, stopped);
+	if (r != PFD_OK) return r;
+	for (auto &s : secs)
+	{
+		int i = s.sec - 1;
+		if (i >= 0 && i < spt && !memcmp(s.data, data + i * 512, 512)) (*ok)++;
+	}
+	return PFD_OK;
+}
+
+// writes a whole track and checks it, or leaves the check for later if the core
+// is waiting for a sector (tries: earlier checks of this data that failed)
+int GwDrive::write_data(int track, int cyl, int hd, int heads, int spt, const uint8_t *data, int tries)
+{
 	double rev_ns = rev_ticks > 0 ? rev_ticks * 1e9 / freq : 200e6;
 	std::vector<uint32_t> flux;
 	if (amiga) mfm_amiga_encode_track(cyl * 2 + hd, data, freq, rev_ns, flux);
@@ -1474,19 +1517,50 @@ int GwDrive::write_track(const pfd_geometry *g, int track, const uint8_t *buf, c
 		if (r == ACK_NO_INDEX) return PFD_CHANGED;
 		if (r) { pf_log("track %d: write status %d, retrying", track, r); continue; }
 
-		// verify
-		r = read_good(cyl, hd, g->heads, spt, secs);
-		if (r != PFD_OK) return r;
-		int ok = 0;
-		for (auto &s : secs)
+		int wc, wh, ws;
+		if (pf_core_wants(&wc, &wh, &ws))
 		{
-			int i = s.sec - 1;
-			if (i >= 0 && i < spt && !memcmp(s.data, data + i * 512, 512)) ok++;
+			later.push_back({ track, cyl, hd, heads, spt, tries + attempt, std::vector<uint8_t>(data, data + spt * 512) });
+			pf_log("track %d written, checked later (the core is waiting for track %d)", track, wc * heads + wh);
+			return PFD_OK;
 		}
+
+		int ok;
+		r = check_track(cyl, hd, heads, spt, data, &ok, NULL);
+		if (r != PFD_OK) return r;
 		if (ok == spt) return PFD_OK;
 		pf_log("track %d: verify found %d of %d sectors right%s", track, ok, spt, attempt ? "" : ", writing again");
 	}
 	return PFD_MEDIUM;
+}
+
+// checks a track whose check was left for later; written again if wrong
+int GwDrive::verify_one()
+{
+	if (later.empty()) return PFD_OK;
+	if (select(1)) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	int chg = get_pin(34);
+	if (chg < 0) return comm_error() ? PFD_NOT_READY : PFD_LOST;
+	if (chg == 0) return PFD_CHANGED; // the disk was changed: dropped with the cache
+
+	unchecked u = later.front();
+	int ok, stopped = 0;
+	int r = check_track(u.cyl, u.hd, u.heads, u.spt, u.data.data(), &ok, &stopped);
+	if (r != PFD_OK) return r;
+	if (stopped) return PFD_OK; // the core waits for a sector: later again
+	later.erase(later.begin());
+	if (ok == u.spt)
+	{
+		pf_log("track %d checked: ok", u.track);
+		return PFD_OK;
+	}
+	if (u.tries + 1 >= 2)
+	{
+		pf_log("track %d: the check found %d of %d sectors right, written twice already: the disk may be damaged there", u.track, ok, u.spt);
+		return PFD_MEDIUM;
+	}
+	pf_log("track %d: the check found %d of %d sectors right, writing again", u.track, ok, u.spt);
+	return write_data(u.track, u.cyl, u.hd, u.heads, u.spt, u.data.data(), u.tries + 1);
 }
 
 // the Greaseweazle keeps the motor on until told otherwise
