@@ -192,12 +192,27 @@ void mfm_ibm_encode_track(int cyl, int head, int spt, const uint8_t *data, doubl
 	static const uint8_t a1[3] = { 0xA1, 0xA1, 0xA1 };
 	int gap3 = spt >= 21 ? 12 : (spt >= 18 ? 84 : (spt >= 15 ? 84 : 80));
 
+	// the PC layout doesn't fit more sectors than a PC uses (the Atari ST
+	// formats of 10 and 11 sectors on a DD track): no index mark, short gaps
+	// and syncs, the rest of the track shared out between the sectors
+	int track_bytes = (int)(rev_ns / cell_ns / 16);
+	int gap1 = 80, gap2 = 22, sync = 12, iam = 1, post_iam = 50;
+	if (spt && 80 + 12 + 4 + 50 + spt * (654 - 80 + gap3) > track_bytes)
+	{
+		gap1 = 16; gap2 = 12; sync = 3; iam = 0; post_iam = 0;
+		gap3 = (track_bytes - gap1 - spt * (sync + 3 + 7 + gap2 + sync + 3 + 1 + 512 + 2)) / spt - 1;
+		if (gap3 < 1) gap3 = 1;
+	}
+
 	cell_writer w;
-	w.bytes(0x4E, 80);
-	w.bytes(0x00, 12);
-	for (int i = 0; i < 3; i++) w.raw16(0x5224);
-	w.byte(0xFC);
-	w.bytes(0x4E, 50);
+	w.bytes(0x4E, gap1);
+	if (iam)
+	{
+		w.bytes(0x00, 12);
+		for (int i = 0; i < 3; i++) w.raw16(0x5224);
+		w.byte(0xFC);
+		w.bytes(0x4E, post_iam);
+	}
 
 	for (int s = 0; s < spt; s++)
 	{
@@ -205,12 +220,12 @@ void mfm_ibm_encode_track(int cyl, int head, int spt, const uint8_t *data, doubl
 		uint16_t crc = crc16_ccitt(crc16_ccitt(0xFFFF, a1, 3), id, 5);
 		id[5] = crc >> 8; id[6] = crc & 0xFF;
 
-		w.bytes(0x00, 12);
+		w.bytes(0x00, sync);
 		for (int i = 0; i < 3; i++) w.raw16(0x4489);
 		for (int i = 0; i < 7; i++) w.byte(id[i]);
-		w.bytes(0x4E, 22);
+		w.bytes(0x4E, gap2);
 
-		w.bytes(0x00, 12);
+		w.bytes(0x00, sync);
 		for (int i = 0; i < 3; i++) w.raw16(0x4489);
 		uint8_t mark = 0xFB;
 		w.byte(mark);

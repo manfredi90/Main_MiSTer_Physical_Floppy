@@ -2230,9 +2230,21 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 		writable = 0;
 		if (!ret) printf("No disk in the Greaseweazle drive\n");
 	}
+	else if (len && is_st() && index <= 1 && pfloppy_is_st_placeholder(name))
+	{
+		// Atari ST floppy A:/B: on the Greaseweazle drive (support/physical_floppy/pf_st.cpp)
+		FileClose(&sd_image[index]);
+		snprintf(sd_image[index].name, sizeof(sd_image[index].name), "%s", name);
+		sd_image[index].offset = 0;
+		sd_image[index].size = pfloppy_st_mount(index, name);
+		ret = sd_image[index].size ? 1 : 0;
+		writable = 0;
+		if (!ret) printf("No disk in the Greaseweazle drive\n");
+	}
 	else if (len)
 	{
 		pfloppy_mac_unmount(index);
+		pfloppy_st_unmount(index);
 		if (!ret)
 		{
 			if (x2trd_ext_supp(name))
@@ -2343,6 +2355,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	else
 	{
 		pfloppy_mac_unmount(index);
+		pfloppy_st_unmount(index);
 		FileClose(&sd_image[index]);
 		c64_closeGCR(index);
 		mac_cdrom_unmount(index);
@@ -3432,6 +3445,7 @@ void user_io_poll()
 	else if ((core_type == CORE_TYPE_8BIT) && !is_menu())
 	{
 		if (is_st()) tos_poll();
+		if (is_st()) pfloppy_st_poll();
 		if (is_snes() || is_sgb()) snes_poll();
 		mdplus_poll(); // MD+ CDDA poll
 
@@ -3530,6 +3544,11 @@ void user_io_poll()
 			{
 				// MacPlus floppy slot on the Greaseweazle drive; SPI is done by the hook.
 				if (pfop < 0) break;
+			}
+			else if (int pfst = pfloppy_st_sd_service(disk, op, lba, sz, ack))
+			{
+				// Atari ST floppy on the Greaseweazle drive; SPI is done by the hook.
+				if (pfst < 0) break;
 			}
 			else if ( sd_type[disk] == SD_TYPE_A2)
 			{

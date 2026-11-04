@@ -74,6 +74,7 @@ class GwDrive : public PfDrive, public PfFluxDrive
 	int mac = 0;             // Macintosh 400K/800K GCR disks (12 to 8 sectors per track by zone)
 	int mac_sd = 0;          // Mac SuperDrive: MFM disks (720K, 1.44 MB) too
 	int mac_mfm = 0;         // the Mac disk in the drive is MFM (read as a PC disk)
+	int atari = 0;           // Atari ST disks: PC sectors, up to 11 per track and 83 cylinders, read-only
 	int gcr() const { return mac && !mac_mfm; }
 	double cell_ns = 1000;
 	int noclick = 1;
@@ -122,6 +123,7 @@ class GwDrive : public PfDrive, public PfFluxDrive
 public:
 	// mac_disks: 1 = Mac GCR disks, 2 = GCR and MFM (SuperDrive)
 	GwDrive(int amiga_disks = 0, int mac_disks = 0) : amiga(amiga_disks), mac(mac_disks != 0), mac_sd(mac_disks == 2) {}
+	void set_atari() { atari = 1; }
 	int open(char *desc, int descsz) override;
 	void close() override;
 	int probe(int present, int changed, pfd_geometry *g, char *why, int whysz) override;
@@ -146,6 +148,7 @@ public:
 PfDrive *pfd_gw_create() { return new GwDrive(); }
 PfDrive *pfd_gw_create_amiga() { return new GwDrive(1); }
 PfDrive *pfd_gw_create_mac(int superdrive) { return new GwDrive(0, superdrive ? 2 : 1); }
+PfDrive *pfd_gw_create_st() { GwDrive *d = new GwDrive(); d->set_atari(); return d; }
 PfFluxDrive *pfd_gw_flux_create() { return new GwDrive(); }
 
 /* ------------------------------------------------------------------ serial */
@@ -997,14 +1000,32 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 		}
 	}
 
+	// Atari ST disks often have more than 80 cylinders (81 to 83): the
+	// cylinders after 79 that hold their own sectors are part of the disk
+	if (atari && !double_step)
+	{
+		for (int c = 80; c < 84; c++)
+		{
+			if (seek(c) != ACK_OKAY || head(0) != ACK_OKAY || read_flux(1, flux) != ACK_OKAY) break;
+			std::vector<mfm_sector> out;
+			mfm_ibm_decode(flux, freq, cell_ns, out);
+			int n = 0;
+			for (auto &s : out) if (s.ok && s.cyl == c && s.head == 0 && s.sec >= 1 && s.sec <= spt) n++;
+			if (n < spt / 2) break;
+			cyl = c + 1;
+		}
+		seek(0);
+	}
+
 	int wp = get_pin(28);
+	if (atari) wp = 0; // read-only for now: the ST sees the disk write-protected
 	g->spt = spt;
 	g->heads = heads;
 	g->cyl = cyl;
 	g->total = spt * heads * cyl;
 	g->wp = (wp == 0);
 	pf_log("format: %s, %d sectors/track, %d head(s), %d cylinders%s%s", cell == 1000 ? "HD 500 kbps" : "DD 250 kbps",
-		spt, heads, cyl, double_step ? " (double step)" : "", wp == 0 ? ", write-protect tab set" : "");
+		spt, heads, cyl, double_step ? " (double step)" : "", atari ? ", read-only" : wp == 0 ? ", write-protect tab set" : "");
 	return PFD_PROBE_NEW;
 }
 
@@ -1424,7 +1445,7 @@ int GwDrive::write_track(const pfd_geometry *g, int track, const uint8_t *buf, c
 	int hd = track % g->heads;
 	int spt = g->spt;
 
-	if (mac) return PFD_WP; // writing Mac disks: not yet
+	if (mac || atari) return PFD_WP; // writing Mac and Atari ST disks: not yet
 
 	if (select(1)) return comm_error() ? PFD_NOT_READY : PFD_LOST;
 	int chg = get_pin(34);

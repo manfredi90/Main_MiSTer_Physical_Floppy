@@ -344,7 +344,8 @@ static int pf_format = PFLOPPY_FORMAT_PC;
 static int open_drive()
 {
 	if (!pf.usb) pf.usb = pfd_usb_create();
-	if (!pf.gw) pf.gw = pf_format == PFLOPPY_FORMAT_AMIGA ? pfd_gw_create_amiga() : pf_format == PFLOPPY_FORMAT_MAC ? pfd_gw_create_mac(0) : pf_format == PFLOPPY_FORMAT_MAC_SD ? pfd_gw_create_mac(1) : pfd_gw_create();
+	if (!pf.gw) pf.gw = pf_format == PFLOPPY_FORMAT_AMIGA ? pfd_gw_create_amiga() : pf_format == PFLOPPY_FORMAT_MAC ? pfd_gw_create_mac(0) :
+		pf_format == PFLOPPY_FORMAT_MAC_SD ? pfd_gw_create_mac(1) : pf_format == PFLOPPY_FORMAT_ST ? pfd_gw_create_st() : pfd_gw_create();
 
 	PfDrive *order[2];
 	int n = 0;
@@ -435,7 +436,7 @@ static void set_media(const pfd_geometry *g)
 	pf.last_why[0] = 0;
 	pthread_mutex_unlock(&pf.lock);
 
-	if (pf_format != PFLOPPY_FORMAT_PC && g->spt == 12) plog("disk inserted: %d sides%s", g->heads, g->wp ? " write-protected" : "");
+	if ((pf_format == PFLOPPY_FORMAT_MAC || pf_format == PFLOPPY_FORMAT_MAC_SD) && g->spt == 12) plog("disk inserted: %d sides%s", g->heads, g->wp ? " write-protected" : "");
 	else plog("disk inserted: %d sectors (%dK) C/H/S %d/%d/%d%s", g->total, g->total / 2, g->cyl, g->heads, g->spt, g->wp ? " write-protected" : "");
 }
 

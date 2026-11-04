@@ -7,6 +7,7 @@
 #include "../../file_io.h"
 #include "../../debug.h"
 #include "../../user_io.h"
+#include "../physical_floppy/physical_floppy.h"
 #include "../../fpga_io.h"
 #include "st_tos.h"
 
@@ -531,7 +532,15 @@ void tos_insert_disk(int index, const char *name)
 	if (index <= 1)
 	{
 		user_io_file_mount(name, index);
-		if (tos_disk_is_inserted(index))
+		uint32_t wpbit = index ? TOS_CONTROL_FDC_WR_PROT_B : TOS_CONTROL_FDC_WR_PROT_A;
+		if (tos_disk_is_inserted(index) && pfloppy_st_slot() == index)
+		{
+			// the Greaseweazle drive (support/physical_floppy/pf_st.cpp) is
+			// read-only for now: the disk is always write-protected
+			if (config.system_ctrl & wpbit) wpins &= ~wpbit;
+			else wpins |= wpbit;
+		}
+		else if (tos_disk_is_inserted(index))
 		{
 			if (!index) wpins &= ~TOS_CONTROL_FDC_WR_PROT_A;
 			else wpins &= ~TOS_CONTROL_FDC_WR_PROT_B;

@@ -44,6 +44,7 @@ void pfloppy_create_placeholder_named(const char *dir, const char *name);
 #define PFLOPPY_FORMAT_AMIGA 1
 #define PFLOPPY_FORMAT_MAC   2   // Mac 400K/800K GCR
 #define PFLOPPY_FORMAT_MAC_SD 3   // Mac SuperDrive: GCR, and 720K/1.44 MB MFM
+#define PFLOPPY_FORMAT_ST    4   // Atari ST: MFM, 9 to 11 sectors per track, up to 83 cylinders
 void pfloppy_set_format(int format);
 
 // use the drive as floppy unit 0 (A:) or 1 (B:). Probes the disk before returning.
@@ -120,5 +121,22 @@ int pfloppy_mac_sd_service(int disk, int op, uint32_t lba, int sz, int ack);
 
 // user_io_poll: a disk inserted, removed or changed is mounted again
 void pfloppy_mac_poll(void);
+
+/*
+ * Atari ST core: the Greaseweazle drive in floppy A: or B:. The core reads
+ * .st images (the sectors in order) one sector at a time: the disk is given
+ * as one, sectors read from the drive when the ST asks for them. MFM disks
+ * of 9 to 11 sectors per track (and 18 on HD disks), up to 83 cylinders.
+ * Read-only for now (the ST sees the disk write-protected). Copy-protected
+ * disks don't work: the core takes sector images only.
+ */
+#define PFLOPPY_ST_PLACEHOLDER "_GREASEWEAZLE_.st"
+
+int pfloppy_is_st_placeholder(const char *path);
+int pfloppy_st_slot(void);                      // the slot with the drive, -1 none
+uint64_t pfloppy_st_mount(int index, const char *path);
+void pfloppy_st_unmount(int index);
+int pfloppy_st_sd_service(int disk, int op, uint32_t lba, int sz, int ack);
+void pfloppy_st_poll(void);
 
 #endif
