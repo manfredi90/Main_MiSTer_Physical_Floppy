@@ -27,6 +27,7 @@ spinning on a MiSTer made me want the same thing for floppies. Thank you!
 | Amiga (Minimig), "AmigaDOS" mode | – | ✔ | ✔ |
 | MacPlus | – | ✔ | – (read only) |
 | MacLC, MacSE30, MacIIcx | – | ✔ | – (read only) |
+| Atari ST | – | ✔ | – (read only) |
 
 - **PC cores**: 720K and 1.44MB disks (and 360K/1.2MB ones with a 5.25"
   drive on the Greaseweazle, not tested yet). The drive only reads what the PC
@@ -40,6 +41,12 @@ spinning on a MiSTer made me want the same thing for floppies. Thank you!
 - **Mac**: 400K and 800K Mac disks. The MacLC, MacSE30 and MacIIcx also take
   720K and 1.44MB disks. Mac disks are read only on purpose: they are getting
   rare, and writing them with a PC drive doesn't work with every drive.
+- **Atari ST**: ST disks of 9, 10 or 11 sectors per track, single or double
+  sided, including the ones with a few extra tracks (81 to 83 cylinders) that
+  many games and menu disks use. Read only for now. **Copy protected
+  originals don't work**: the ST core only knows plain disk images (.st), so
+  the protection can't reach it. Unprotected disks, cracked "backup copies",
+  menu disks, demos and your own disks are fine.
 
 Disk images keep working exactly as before: you only get the real drive when
 you pick the special file described below.
@@ -49,7 +56,8 @@ you pick the special file described below.
 - A MiSTer, of course
 - One of these:
   - a **USB floppy drive**, the common kind you find online (tested with a
-    Sony USB-FDU). PC cores only.
+    Sony USB-FDU). PC cores only: it can't read the ST's 10 and 11 sector
+    disks, so the Atari ST needs the Greaseweazle too.
   - a **Greaseweazle** (tested with V4.1) with a normal 3.5" PC
     floppy drive. Works with every core in the table.
 - For the Amiga **flux mode**: a Minimig core from October 10, 2026 or newer
@@ -97,6 +105,9 @@ you pick the special file described below.
 
    [MacIIcx]
    main=MiSTer_Physical-Floppy
+
+   [AtariST]
+   main=MiSTer_Physical-Floppy
    ```
 
    When you load one of these cores the MiSTer switches to this Main by
@@ -118,6 +129,7 @@ image, means "use the real drive":
 | Amiga, flux mode | `_GREASEWEAZLE_.adf` | DF0: (or another drive) |
 | Amiga, AmigaDOS mode | `_GREASEWEAZLE_DOS_.adf` | DF0: (or another drive) |
 | Mac | `_GREASEWEAZLE_.dsk` | the floppy drive |
+| Atari ST | `_GREASEWEAZLE_.st` | Floppy A: or B: in the ST menu |
 
 After that, use the drive just like on the real computer: swap disks whenever
 you want and the core notices.
@@ -133,9 +145,48 @@ A few things worth knowing:
 - **Wait for the drive to stop before taking a disk out**, especially right
   after saving something: changes reach the disk a moment after the computer
   saves them.
+- **Atari ST disks show up write-protected**, since writing them isn't
+  supported yet. A game that wants to save to its disk will complain.
 - **Write protect your precious disks** (slide the little tab). Windows, for
   example, likes to write to a floppy even when you're only copying files
   from it.
+
+## Atari ST: making disks from .st images
+
+Want to put a `.st` image back on a real floppy? The Greaseweazle can do it on
+a PC, but you have to tell it the disk's format, and a `.st` file doesn't say
+what it is. Its size does:
+
+| Size in bytes | Sectors per track | Sides | Cylinders | Greaseweazle format |
+|---|---|---|---|---|
+| 368,640 | 9 | 1 | 80 | `atarist.360` |
+| 409,600 | 10 | 1 | 80 | `atarist.400` |
+| 450,560 | 11 | 1 | 80 | `atarist.440` |
+| 737,280 | 9 | 2 | 80 | `atarist.720` |
+| 819,200 | 10 | 2 | 80 | `atarist.800` |
+| 901,120 | 11 | 2 | 80 | `atarist.880` |
+
+Anything else usually has a few extra cylinders: divide the size by 512, then
+by the sectors per track and by the sides, and you get the cylinders (81 to
+83). For example 764,928 bytes = 9 sectors, 2 sides, 83 cylinders. Those don't
+have a ready-made format: copy the matching one from the Greaseweazle's
+`diskdefs_atarist.cfg`, change `cyls`, save it as, say, `mydisk.cfg`, and:
+
+```
+gw write --diskdefs mydisk.cfg --format atarist.720 game.st
+```
+
+(with your own name after `disk` in the file, and the same name after
+`--format`). Don't skip the extra cylinders: cracked games often keep part of
+the game there, outside the files.
+
+Two tips:
+
+- **Use a clean floppy, or one you've formatted.** The Greaseweazle only
+  writes the cylinders of the image: leftovers of an earlier, bigger format
+  stay on the tracks after it.
+- **Read it back** (`gw read` with the same format) and check that every
+  sector is found. The extra cylinders are the first to go on a tired floppy.
 
 ## PCAT-286 users: give the BIOS a bit more patience
 
@@ -208,6 +259,8 @@ in Zaparoo instead of relying on auto detection.)
   example *Desert Dream* by Kefrens). They work in AmigaDOS mode, or from an
   ADF.
 - **Mac disks** are read only, and slow to load (see above).
+- **Atari ST**: copy protected originals don't work, only unprotected disks
+  and backup copies (see above).
 - **Not every PC drive reads Mac disks well.** Mac disks are recorded in a
   way PC drives weren't made for, and some drives struggle with the inner
   tracks (cylinders 48 to 79): the log then shows lots of bad sectors there,
