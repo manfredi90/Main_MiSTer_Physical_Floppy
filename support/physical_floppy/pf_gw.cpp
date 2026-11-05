@@ -1008,7 +1008,7 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 		{
 			// a few reads, both sides: the outer cylinders are often the weakest
 			// part of a disk (and of a drive)
-			int found = 0;
+			int found = 0, other = -1, nsec = 0;
 			for (int attempt = 0; attempt < 3 && !found; attempt++)
 			{
 				int hd = heads == 2 ? attempt & 1 : 0;
@@ -1016,10 +1016,24 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 				std::vector<mfm_sector> out;
 				mfm_ibm_decode(flux, freq, cell_ns, out);
 				int n = 0;
-				for (auto &s : out) if (s.cyl == c && s.sec >= 1 && s.sec <= spt) n++; // a sector header is enough
+				for (auto &s : out)
+				{
+					nsec++;
+					if (s.cyl == c && s.sec >= 1 && s.sec <= spt) n++; // a sector header is enough
+					else if (s.ok) other = s.cyl;
+				}
 				found = n >= 2;
 			}
-			if (!found) break;
+			if (!found)
+			{
+				// what is there, for the log: nothing (an 80-cylinder disk), or the
+				// sectors of another cylinder (the drive doesn't reach this one)
+				if (other >= 0 && other != c)
+					pf_log("cylinder %d: the head reads the sectors of cylinder %d there: the drive may not reach cylinder %d (the disk has more cylinders than the drive reads)", c, other, c);
+				else if (nsec)
+					pf_log("cylinder %d: %d unreadable sectors, the disk taken as %d cylinders", c, nsec, c);
+				break;
+			}
 			cyl = c + 1;
 		}
 		seek(0);
