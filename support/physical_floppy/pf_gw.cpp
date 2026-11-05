@@ -1008,7 +1008,7 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 		{
 			// a few reads, both sides: the outer cylinders are often the weakest
 			// part of a disk (and of a drive)
-			int found = 0, other = -1, nsec = 0;
+			int found = 0, other = -1, nsec = 0, maxsec = 0;
 			for (int attempt = 0; attempt < 3 && !found; attempt++)
 			{
 				int hd = heads == 2 ? attempt & 1 : 0;
@@ -1019,10 +1019,16 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 				for (auto &s : out)
 				{
 					nsec++;
-					if (s.cyl == c && s.sec >= 1 && s.sec <= spt) n++; // a sector header is enough
+					if (s.cyl == c && s.sec >= 1 && s.sec <= spt)
+					{
+						n++; // a sector header is enough
+						if (s.sec > maxsec) maxsec = s.sec;
+					}
 					else if (s.ok) other = s.cyl;
 				}
-				found = n >= 2;
+				// and the same format: left over from an earlier format of the
+				// floppy (another number of sectors) is not part of this disk
+				found = n >= 2 && maxsec == spt;
 			}
 			if (!found)
 			{
@@ -1030,6 +1036,8 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 				// sectors of another cylinder (the drive doesn't reach this one)
 				if (other >= 0 && other != c)
 					pf_log("cylinder %d: the head is still on cylinder %d (the last one this drive reaches), the disk taken as %d cylinders", c, other, c);
+				else if (maxsec && maxsec != spt)
+					pf_log("cylinder %d: sectors of another format there (up to sector %d, the disk has %d per track): left from an earlier use of the floppy, the disk taken as %d cylinders", c, maxsec, spt, c);
 				else if (nsec)
 					pf_log("cylinder %d: %d unreadable sectors, the disk taken as %d cylinders", c, nsec, c);
 				break;
