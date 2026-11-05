@@ -1029,7 +1029,7 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 				// what is there, for the log: nothing (an 80-cylinder disk), or the
 				// sectors of another cylinder (the drive doesn't reach this one)
 				if (other >= 0 && other != c)
-					pf_log("cylinder %d: the head reads the sectors of cylinder %d there: the drive may not reach cylinder %d (the disk has more cylinders than the drive reads)", c, other, c);
+					pf_log("cylinder %d: the head is still on cylinder %d (the last one this drive reaches), the disk taken as %d cylinders", c, other, c);
 				else if (nsec)
 					pf_log("cylinder %d: %d unreadable sectors, the disk taken as %d cylinders", c, nsec, c);
 				break;
