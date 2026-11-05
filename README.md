@@ -169,15 +169,33 @@ what it is. Its size does:
 Anything else usually has a few extra cylinders: divide the size by 512, then
 by the sectors per track and by the sides, and you get the cylinders (81 to
 83). For example 764,928 bytes = 9 sectors, 2 sides, 83 cylinders. Those don't
-have a ready-made format: copy the matching one from the Greaseweazle's
-`diskdefs_atarist.cfg`, change `cyls`, save it as, say, `mydisk.cfg`, and:
+have a ready-made format, so make one: a small text file, say `st83.cfg`,
+with the settings of the matching standard format (from the Greaseweazle's
+`diskdefs_atarist.cfg`) and your number of cylinders:
 
 ```
-gw write --diskdefs mydisk.cfg --format atarist.720 game.st
+disk st83
+    cyls = 83
+    heads = 2
+    tracks * ibm.mfm
+        secs = 9
+        bps = 512
+        gap3 = 84
+        rate = 250
+        iam = no
+    end
+end
 ```
 
-(with your own name after `disk` in the file, and the same name after
-`--format`). Don't skip the extra cylinders: cracked games often keep part of
+then write the disk with:
+
+```
+gw write --diskdefs st83.cfg --format st83 game.st
+```
+
+For 10 or 11 sectors, copy `gap3` and `rate` from `atarist.800` or
+`atarist.880`: 11 sectors only fit on a track with tiny gaps and a slightly
+faster write. Don't skip the extra cylinders: cracked games often keep part of
 the game there, outside the files.
 
 Two tips:
