@@ -1006,12 +1006,20 @@ int GwDrive::detect_pc(pfd_geometry *g, char *why, int whysz)
 	{
 		for (int c = 80; c < 84; c++)
 		{
-			if (seek(c) != ACK_OKAY || head(0) != ACK_OKAY || read_flux(1, flux) != ACK_OKAY) break;
-			std::vector<mfm_sector> out;
-			mfm_ibm_decode(flux, freq, cell_ns, out);
-			int n = 0;
-			for (auto &s : out) if (s.ok && s.cyl == c && s.head == 0 && s.sec >= 1 && s.sec <= spt) n++;
-			if (n < spt / 2) break;
+			// a few reads, both sides: the outer cylinders are often the weakest
+			// part of a disk (and of a drive)
+			int found = 0;
+			for (int attempt = 0; attempt < 3 && !found; attempt++)
+			{
+				int hd = heads == 2 ? attempt & 1 : 0;
+				if (seek(c) != ACK_OKAY || head(hd) != ACK_OKAY || read_flux(1, flux) != ACK_OKAY) break;
+				std::vector<mfm_sector> out;
+				mfm_ibm_decode(flux, freq, cell_ns, out);
+				int n = 0;
+				for (auto &s : out) if (s.cyl == c && s.sec >= 1 && s.sec <= spt) n++; // a sector header is enough
+				found = n >= 2;
+			}
+			if (!found) break;
 			cyl = c + 1;
 		}
 		seek(0);
