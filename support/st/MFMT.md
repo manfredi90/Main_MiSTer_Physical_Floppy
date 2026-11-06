@@ -96,7 +96,26 @@ PLL: data bits are the odd cells after synchronisation.
   Otherwise the counter is just reset. This is the behaviour measured on real
   chips (see MAME `wd_fdc.cpp`). It produces the `14 A1 A1` / `C2 A1 A1`
   sequences seen in real read-track dumps, and it changed the match of the
-  test images from 85 % to 98 %.
+  test images from 85 % to 98 %. Read track starts with the cell under the
+  index (cell 0) and ends before the next cell 0. The shift register keeps
+  the cells that precede the index, so a sync mark that straddles the index
+  is still found.
+- **Writes.** For now, write sector and write track on an MFMT image end
+  at once with the write-protect bit set, as on a protected disk.
+
+## Reference implementation in the core
+
+AtariST_MiSTer, branch `st-stx`:
+
+- `rtl/fdc1772/mfmt_track.sv`: the drive (loader, playback, weak cells,
+  index).
+- `rtl/fdc1772/mfm_dec.sv`: the byte assembly (search, field and
+  read-track modes).
+- `rtl/fdc1772/fdc1772.sv`: the read address / read sector / read track
+  engine on the decoded bytes. It is used when `img_size[63:56] == 1`;
+  `.st` images keep the sector path.
+- `sim/mfmt`, `sim/fdc`: Verilator testbenches. The C++ side serves the
+  tracks with this converter and compares against `test/wdsim`.
 
 ## STX conversion (Main)
 
