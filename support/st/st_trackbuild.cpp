@@ -10,6 +10,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <algorithm>
 #include "st_trackbuild.h"
 
 uint16_t st_crc16(uint16_t crc, uint8_t value)
@@ -33,6 +34,7 @@ void TrackBuilder::reset(int len, uint8_t fill_value)
 	m_hd = false;
 	m_rev_ns = 200000000.0;
 	m_extra = 0;
+	m_jumps.clear();
 }
 
 void TrackBuilder::put(int pos, uint8_t value, uint8_t owner, uint8_t mark)
@@ -115,6 +117,115 @@ static void merge_runs(std::vector<TimingRun> &runs, size_t max_runs)
 	}
 }
 
+void TrackBuilder::add_jump(int pos, int k)
+{
+	if (!k) return;
+	if (k > 15) k = 15;
+	if (k < -15) k = -15;
+	remove_jump(pos);
+	m_jumps.push_back(std::make_pair(pos, k));
+	std::sort(m_jumps.begin(), m_jumps.end());
+}
+
+void TrackBuilder::remove_jump(int pos)
+{
+	for (size_t i = 0; i < m_jumps.size(); i++)
+		if (m_jumps[i].first == pos) { m_jumps.erase(m_jumps.begin() + i); return; }
+}
+
+double TrackBuilder::free_byte_ns() const
+{
+	const double nominal_byte = m_hd ? 16000.0 : 32000.0;
+	double fixed_ns = 0;
+	int free_bytes = 0;
+	for (const Byte &b : m_bytes)
+	{
+		if (b.time_ns > 0) fixed_ns += b.time_ns;
+		else free_bytes++;
+	}
+	double free_byte = nominal_byte;
+	if (free_bytes) free_byte = (m_rev_ns - fixed_ns) / free_bytes;
+	// keep the derived speed physically plausible (+/- 15 %)
+	if (free_byte < nominal_byte * 0.85) free_byte = nominal_byte * 0.85;
+	if (free_byte > nominal_byte * 1.15) free_byte = nominal_byte * 1.15;
+	return free_byte;
+}
+
+void TrackBuilder::build_cells(Cells &out) const
+{
+	int n = (int)m_bytes.size();
+	if (n > ST_MFMT_MAX_CELLS / 16 - 16) n = ST_MFMT_MAX_CELLS / 16 - 16;
+	out.bit.clear(); out.weak.clear(); out.ns.clear();
+	out.byte_cell.assign(n, 0);
+	out.bit.reserve(n * 16 + 64); out.weak.reserve(n * 16 + 64); out.ns.reserve(n * 16 + 64);
+	double free_byte = free_byte_ns();
+
+	// clock of the first byte depends on the last data bit of the track
+	const Byte &last = m_bytes[n - 1];
+	int prev = (last.mark == MARK_C2) ? 0 : (last.value & 1);
+	size_t j = 0;
+
+	for (int i = 0; i < n; i++)
+	{
+		const Byte &b = m_bytes[i];
+		float cell_ns = (float)((b.time_ns > 0 ? b.time_ns : free_byte) / 16.0);
+
+		// a phase jump: the cells before it continue (the gap or data just
+		// written goes on for a few more cells), then this byte starts
+		while (j < m_jumps.size() && m_jumps[j].first < i) j++;
+		if (j < m_jumps.size() && m_jumps[j].first == i && out.bit.size() > 16)
+		{
+			int k = m_jumps[j].second;
+			if (k > 0)
+			{
+				size_t from = out.bit.size() - 16;
+				for (int e = 0; e < k; e++)
+				{
+					out.bit.push_back(out.bit[from + (e % 16)]);
+					out.weak.push_back(0);
+					out.ns.push_back(cell_ns);
+				}
+			}
+			else
+			{
+				// the next pass starts before the end of the previous byte
+				for (int e = 0; e < -k; e++) { out.bit.pop_back(); out.weak.pop_back(); out.ns.pop_back(); }
+			}
+			prev = out.bit.back();
+		}
+
+		out.byte_cell[i] = (int)out.bit.size();
+		uint16_t w;
+		if (b.mark == MARK_A1) { w = 0x4489; prev = 1; }
+		else if (b.mark == MARK_C2) { w = 0x5224; prev = 0; }
+		else w = mfm_encode(b.value, prev);
+		uint16_t wm = weak_to_cells(b.weak);
+		for (int c = 15; c >= 0; c--)
+		{
+			out.bit.push_back((w >> c) & 1);
+			out.weak.push_back((wm >> c) & 1);
+			out.ns.push_back(cell_ns);
+		}
+	}
+
+	// extra cells at the write splice by the index: the gap at the start
+	// of the track continues across it, only its phase changes
+	if (m_extra)
+	{
+		float cell_ns = out.ns.back();
+		for (int e = 0; e < m_extra; e++)
+		{
+			out.bit.push_back(out.bit[16 - m_extra + e]);
+			out.weak.push_back(0);
+			out.ns.push_back(cell_ns);
+		}
+		// the first cell of the track now follows the last extra cell: apply
+		// the MFM clock rule to it again (1 only between two 0 cells)
+		if (!m_bytes[0].mark)
+			out.bit[0] = (!out.bit.back() && !out.bit[1]) ? 1 : 0;
+	}
+}
+
 bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cells) const
 {
 	memset(meta, 0, ST_MFMT_META_BYTES);
@@ -138,54 +249,25 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 	}
 
 	uint16_t flags = ST_MFMT_F_FORMATTED | (m_hd ? ST_MFMT_F_HD : 0);
-	int n = (int)m_bytes.size();
-	if (n > ST_MFMT_MAX_CELLS / 16 - 1)
-	{
-		n = ST_MFMT_MAX_CELLS / 16 - 1;
-		flags |= ST_MFMT_F_TRUNCATED;
-	}
+	if ((int)m_bytes.size() > ST_MFMT_MAX_CELLS / 16 - 16) flags |= ST_MFMT_F_TRUNCATED;
+
+	Cells cs;
+	build_cells(cs);
+	int total = (int)cs.bit.size();
+	int nwords = (total + 15) / 16;
 
 	// ---- cells ----
-	int prev = 0;
-	{
-		// clock of the first byte depends on the last data bit of the track
-		const Byte &last = m_bytes[n - 1];
-		prev = (last.mark == MARK_C2) ? 0 : (last.value & 1);
-	}
-	for (int i = 0; i < n; i++)
-	{
-		const Byte &b = m_bytes[i];
-		uint16_t w;
-		if (b.mark == MARK_A1) { w = 0x4489; prev = 1; }
-		else if (b.mark == MARK_C2) { w = 0x5224; prev = 0; }
-		else w = mfm_encode(b.value, prev);
-		cw[i] = w;
-	}
+	for (int c = 0; c < total; c++) if (cs.bit[c]) cw[c >> 4] |= 0x8000 >> (c & 15);
 
-	// ---- timing ----
-	const double nominal_byte = m_hd ? 16000.0 : 32000.0;   // ns
-	double fixed_ns = 0;
-	int free_bytes = 0;
-	for (int i = 0; i < n; i++)
-	{
-		if (m_bytes[i].time_ns > 0) fixed_ns += m_bytes[i].time_ns;
-		else free_bytes++;
-	}
-	double free_byte = nominal_byte;
-	if (free_bytes) free_byte = (m_rev_ns - fixed_ns) / free_bytes;
-	// keep the derived speed physically plausible (+/- 15 %)
-	if (free_byte < nominal_byte * 0.85) free_byte = nominal_byte * 0.85;
-	if (free_byte > nominal_byte * 1.15) free_byte = nominal_byte * 1.15;
-
+	// ---- timing: one length per word (that of its first cell) ----
 	std::vector<TimingRun> runs;
 	double rev = 0;
-	for (int i = 0; i < n; i++)
+	for (int c = 0; c < total; c++) rev += cs.ns[c];
+	for (int w = 0; w < nwords; w++)
 	{
-		double t = m_bytes[i].time_ns > 0 ? m_bytes[i].time_ns : free_byte;
-		double cell = t;   // byte time in ns == cell length in 1/16 ns units
-		rev += t;
+		double cell = cs.ns[w * 16] * 16.0;    // 1/16 ns units
 		if (!runs.empty() && fabs(runs.back().cell - cell) < 0.5) runs.back().words++;
-		else runs.push_back(TimingRun{ (uint32_t)i, 1, cell });
+		else runs.push_back(TimingRun{ (uint32_t)w, 1, cell });
 	}
 	merge_runs(runs, ST_MFMT_MAX_TIMING);
 	for (size_t i = 0; i < runs.size(); i++)
@@ -200,14 +282,16 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 	if (runs.size() > 1) flags |= ST_MFMT_F_VARTIME;
 	hdr->rev_time_ns = (uint32_t)(rev + 0.5);
 
-	// ---- weak bits ----
+	// ---- weak cells: one mask word per track word ----
+	std::vector<uint16_t> wmask(nwords, 0);
+	for (int c = 0; c < total; c++) if (cs.weak[c]) wmask[c >> 4] |= 0x8000 >> (c & 15);
 	struct Seg { int start, words; };
 	std::vector<Seg> segs;
-	for (int i = 0; i < n; i++)
+	for (int w = 0; w < nwords; w++)
 	{
-		if (!m_bytes[i].weak) continue;
-		if (!segs.empty() && segs.back().start + segs.back().words == i) segs.back().words++;
-		else segs.push_back(Seg{ i, 1 });
+		if (!wmask[w]) continue;
+		if (!segs.empty() && segs.back().start + segs.back().words == w) segs.back().words++;
+		else segs.push_back(Seg{ w, 1 });
 	}
 	// too many segments: join the closest ones (gap words get an empty mask)
 	while (segs.size() > ST_MFMT_MAX_WEAK)
@@ -235,7 +319,7 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 		if (words <= 0) break;
 		weak[nweak].start_word = (uint16_t)s.start;
 		weak[nweak].n_words = (uint16_t)words;
-		for (int i = 0; i < words; i++) pool[pool_used + i] = weak_to_cells(m_bytes[s.start + i].weak);
+		for (int i = 0; i < words; i++) pool[pool_used + i] = wmask[s.start + i];
 		pool_used += words;
 		nweak++;
 	}
@@ -243,21 +327,7 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 	hdr->pool_words = (uint16_t)pool_used;
 	if (nweak) flags |= ST_MFMT_F_WEAK;
 
-	// extra cells at the splice: the last cells of the first word, so the
-	// gap at the start of the track simply continues across the splice
-	// (only its phase changes, as on a real track)
-	if (m_extra)
-	{
-		cw[n] = (uint16_t)(cw[0] << (16 - m_extra));
-		// the first cell of the track now follows the last extra cell: apply
-		// the MFM clock rule to it again (1 only between two 0 cells)
-		int before = (cw[n] >> (16 - m_extra)) & 1;
-		int after = (cw[0] >> 14) & 1;
-		if (!(cw[0] == 0x4489 || cw[0] == 0x5224))
-			cw[0] = (uint16_t)((cw[0] & 0x7FFF) | ((!before && !after) ? 0x8000 : 0));
-		hdr->rev_time_ns += (uint32_t)(m_extra * free_byte / 16.0);
-	}
-	hdr->cell_count = (uint32_t)n * 16 + m_extra;
+	hdr->cell_count = (uint32_t)total;
 	hdr->flags = flags;
 	return true;
 }
