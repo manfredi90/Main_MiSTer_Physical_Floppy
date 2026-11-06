@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <map>
+#include <vector>
 
 #include "../../hardware.h"
 #include "../../user_io.h"
@@ -29,12 +31,18 @@
 #define ST_FDD_SLOTS     2
 #define ST_FDD_MAX_FILE  (4 * 1024 * 1024)
 
+// Built tracks are kept for the whole time the image is mounted: the
+// rebuild of a protected track (phase jump search) can take seconds on
+// the ARM, and loaders often go back and forth between tracks.
+struct StFddTrack
+{
+	std::vector<uint8_t> meta, cells;
+};
+
 struct StFddSlot
 {
 	StxImage *stx = nullptr;
-	int cached_cyl = -1, cached_head = -1;
-	uint8_t meta[ST_MFMT_META_BYTES];
-	uint8_t cells[ST_MFMT_CELLS_BYTES];
+	std::map<int, StFddTrack> tracks;   // key: cyl * 2 + head
 };
 
 static StFddSlot slots[ST_FDD_SLOTS];
@@ -50,8 +58,7 @@ void st_fdd_unmount(int index)
 	if (index < 0 || index >= ST_FDD_SLOTS) return;
 	delete slots[index].stx;
 	slots[index].stx = nullptr;
-	slots[index].cached_cyl = -1;
-	slots[index].cached_head = -1;
+	slots[index].tracks.clear();
 }
 
 int st_fdd_mount_hook(int index, const char *name, fileTYPE *f, int *writable)
@@ -101,15 +108,21 @@ uint64_t st_fdd_size(int index, uint64_t size)
 	return size | (ST_FDD_TYPE_MFMT << ST_FDD_SIZE_TYPE_SHIFT);
 }
 
-static void build(StFddSlot &s, int cyl, int head)
+static const StFddTrack &build(StFddSlot &s, int cyl, int head)
 {
-	if (s.cached_cyl == cyl && s.cached_head == head) return;
+	int key = cyl * 2 + head;
+	auto it = s.tracks.find(key);
+	if (it != s.tracks.end()) return it->second;
+	StFddTrack &t = s.tracks[key];
+	t.meta.resize(ST_MFMT_META_BYTES);
+	t.cells.resize(ST_MFMT_CELLS_BYTES);
 	TrackBuilder tb;
 	StxBuildReport rep;
 	stx_build_track(*s.stx, cyl, head, tb, &rep);
-	tb.encode((uint8_t)cyl, (uint8_t)head, s.meta, s.cells);
-	s.cached_cyl = cyl;
-	s.cached_head = head;
+	tb.encode((uint8_t)cyl, (uint8_t)head, t.meta.data(), t.cells.data());
+	if (rep.jumps || rep.splice_cells)
+		printf("STX: track %d.%d rebuilt with %d phase jump(s), splice +%d cells\n", cyl, head, rep.jumps, rep.splice_cells);
+	return t;
 }
 
 int st_fdd_sd_service(int disk, int op, uint64_t lba, int sz, int ack)
@@ -138,9 +151,9 @@ int st_fdd_sd_service(int disk, int op, uint64_t lba, int sz, int ack)
 		int head = (lba >> 8) & 1;
 		int part = (lba >> ST_MFMT_LBA_PART_SHIFT) & 3;
 		diskled_on();
-		build(s, cyl, head);
-		if (part == ST_MFMT_PART_META) memcpy(buf, s.meta, sz < ST_MFMT_META_BYTES ? sz : ST_MFMT_META_BYTES);
-		else if (part == ST_MFMT_PART_CELLS) memcpy(buf, s.cells, sz);
+		const StFddTrack &t = build(s, cyl, head);
+		if (part == ST_MFMT_PART_META) memcpy(buf, t.meta.data(), sz < ST_MFMT_META_BYTES ? sz : ST_MFMT_META_BYTES);
+		else if (part == ST_MFMT_PART_CELLS) memcpy(buf, t.cells.data(), sz);
 	}
 	// a sector request on a track image means an old core: it gets empty sectors
 
