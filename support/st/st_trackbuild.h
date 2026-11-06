@@ -57,6 +57,12 @@ public:
 	void set_unformatted() { m_formatted = false; }
 	void set_hd(bool hd) { m_hd = hd; }
 
+	// Cells added after the last byte (0..15). The write splice near the
+	// index of a real track is rarely a whole number of bytes: a sector read
+	// across the index then continues one or more cells out of phase.
+	void set_extra_cells(int k) { m_extra = (k < 0) ? 0 : (k > 15 ? 15 : k); }
+	int extra_cells() const { return m_extra; }
+
 	// Revolution time used to size the bytes without an explicit time.
 	// Default 200 ms (300 RPM).
 	void set_revolution_ns(double ns) { m_rev_ns = ns; }
@@ -82,6 +88,7 @@ private:
 	bool   m_formatted = true;
 	bool   m_hd = false;
 	double m_rev_ns = 200000000.0;
+	int    m_extra = 0;
 };
 
 // CRC-CCITT as computed by the WD1772 (init 0xFFFF, poly 0x1021)

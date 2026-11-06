@@ -98,6 +98,7 @@ struct StxBuildReport
 	int overlaps = 0;                 // header bytes written over another sector's data
 	int overlap_mismatch = 0;         // ... and changing that data
 	bool image_ignored = false;       // track image unusable, rebuilt from the sectors
+	int splice_cells = 0;             // extra cells at the end of the turn (write splice)
 	bool unformatted = false;
 };
 

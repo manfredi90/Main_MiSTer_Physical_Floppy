@@ -270,6 +270,32 @@ static bool is_garbled_sync(uint8_t v)
 	return v == 0xA1 || v == 0x14 || v == 0xC2 || v == 0x0A || v == 0xE1 || v == 0xCE;
 }
 
+// Read track only aligns on sync marks, so the gap bytes it returns before
+// the first sync after the index (or after a field) are often the gap read
+// out of phase: 4E comes out as one of its bit rotations, 00 as FF. Runs of
+// such bytes go back to the real gap values, as MAME does in pasti_dsk.cpp
+// (Skyfox track 79 starts with 27 27 27..., a 4E gap read 3 cells late).
+static void unshift_image_gaps(TrackBuilder &tb)
+{
+	static const uint8_t rot4e[] = { 0x4e, 0x21, 0x9c, 0x42, 0x39, 0x84, 0x72, 0x09,
+	                                 0xe4, 0x12, 0xc9, 0x24, 0x93, 0x48, 0x27, 0x90 };
+	int n = tb.size();
+	for (int i = 0; i < n;)
+	{
+		uint8_t v = tb.at(i).value;
+		int j = i + 1;
+		while (j < n && tb.at(j).value == v) j++;
+		if (j - i >= 4)
+		{
+			uint8_t r = v;
+			if (v == 0xFF) r = 0x00;
+			for (uint8_t x : rot4e) if (v == x) r = 0x4E;
+			if (r != v) for (int k = i; k < j; k++) tb.put(k, r, 0);
+		}
+		i = j;
+	}
+}
+
 // Rebuild the sync marks of a read-track image. "x A1 A1 mark" in read
 // track output can only come from real sync marks on the disk, because the
 // WD1772 re-aligned its byte boundary there.
@@ -358,6 +384,60 @@ static void put_owned(TrackBuilder &tb, int pos, uint8_t v, uint8_t owner, uint8
 	tb.put(pos, v, owner, mark);
 }
 
+
+// Byte k of a field whose first data byte starts at cell c0, decoded from
+// MFMT cells (data bits are the odd cells), wrapping at the end of the turn
+static uint8_t cells_byte(const uint8_t *cells, uint32_t ncells, uint32_t c0, int k)
+{
+	const uint16_t *w = (const uint16_t *)cells;
+	uint8_t v = 0;
+	for (int i = 0; i < 8; i++)
+	{
+		uint32_t c = (c0 + 16 * k + 2 * i + 1) % ncells;
+		v = (uint8_t)((v << 1) | ((w[c >> 4] >> (15 - (c & 15))) & 1));
+	}
+	return v;
+}
+
+// A sector whose data runs past the index was read by the original WD
+// across the write splice. Find how many extra cells at the end of the turn
+// make its recorded data match (Skyfox, track 79: sector 2C reads the ID of
+// sector 1 one cell out of phase).
+static void fit_splice(const StxTrack &t, const std::vector<int> &dpos, TrackBuilder &tb, StxBuildReport *rep)
+{
+	int n = tb.size();
+	std::vector<int> cross;
+	for (int s = 0; s < (int)t.sectors.size(); s++)
+	{
+		const StxSector &sec = t.sectors[s];
+		if (dpos[s] >= 0 && sec.data && dpos[s] + 4 + sec.size > n) cross.push_back(s);
+	}
+	if (cross.empty()) return;
+
+	std::vector<uint8_t> meta(ST_MFMT_META_BYTES), cells(ST_MFMT_CELLS_BYTES);
+	int best_k = 0, best_score = -1;
+	for (int k = 0; k < 16; k++)
+	{
+		tb.set_extra_cells(k);
+		tb.encode(0, 0, meta.data(), cells.data());
+		uint32_t nc = ((const st_mfmt_header *)meta.data())->cell_count;
+		int score = 0;
+		for (int s : cross)
+		{
+			const StxSector &sec = t.sectors[s];
+			uint32_t c0 = (uint32_t)(dpos[s] + 4) * 16;
+			for (int i = 0; i < sec.size; i++)
+			{
+				uint8_t m = sec.fuzzy ? sec.fuzzy[i] : 0xFF;
+				if (((cells_byte(cells.data(), nc, c0, i) ^ sec.data[i]) & m) == 0) score++;
+			}
+		}
+		if (score > best_score) { best_score = score; best_k = k; }
+	}
+	tb.set_extra_cells(best_k);
+	if (rep) rep->splice_cells = best_k;
+}
+
 bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, StxBuildReport *rep)
 {
 	StxBuildReport dummy;
@@ -430,6 +510,7 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 	if (use_image)
 	{
 		for (int i = 0; i < n; i++) tb.put(i, t->image[i], 0);
+		unshift_image_gaps(tb);
 		mark_image_syncs(tb);
 		for (int s = 0; s < ns; s++)
 		{
@@ -487,11 +568,18 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 		}
 	}
 
-	// pass 1: data fields
+	// pass 1: data fields. Sectors with an intentional CRC error or fuzzy
+	// bits go first and sound sectors last, so where they overlap the sound
+	// ones win: on the original disk those read correctly, while the
+	// protected one has a bad CRC anyway (Skyfox: the data of sector 2C on
+	// track 79 runs past the index over the ID and data mark of sector 1).
+	for (int round = 0; round < 2; round++)
 	for (int s = 0; s < ns; s++)
 	{
 		const StxSector &sec = t->sectors[s];
 		if (dpos[s] < 0 || !sec.data) continue;
+		bool protected_sector = (sec.status & STX_SECT_CRC_ERROR) || sec.fuzzy;
+		if (protected_sector != (round == 0)) continue;
 		uint8_t owner = (uint8_t)(s < 254 ? s + 1 : 255);
 		int d = dpos[s];
 		uint8_t dam = (sec.status & STX_SECT_DELETED) ? 0xF8 : 0xFB;
@@ -507,11 +595,19 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 		tb.set_weak(d + 3, 0);
 		crc = st_crc16(crc, dam);
 
+		// A protected sector (bad CRC) whose data runs past the index was read
+		// across the write splice: after the index the original WD saw the
+		// start of the track out of phase. Its bytes are written up to the
+		// index only; the rest is what the track holds there, read through the
+		// splice cells chosen by fit_splice().
+		bool stop_at_index = (sec.status & STX_SECT_CRC_ERROR) && d + 4 + sec.size > tb.size();
+
 		for (int i = 0; i < sec.size; i++)
 		{
 			int pos = d + 4 + i;
 			uint8_t v = sec.data[i];
 			crc = st_crc16(crc, v);
+			if (stop_at_index && pos >= tb.size()) continue;
 			uint8_t weak = 0;
 			if (sec.fuzzy)
 			{
@@ -536,6 +632,7 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 			}
 			if (!img_bad) crc ^= 0x5A5A;
 		}
+		if (stop_at_index) continue;
 		put_owned(tb, d + 4 + sec.size, crc >> 8, owner, 0, rep);
 		put_owned(tb, d + 5 + sec.size, crc & 0xFF, owner, 0, rep);
 		tb.set_weak(d + 4 + sec.size, 0);
@@ -570,5 +667,6 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 		for (int i = 0; i < 10; i++) tb.set_weak(h + i, 0);
 	}
 
+	fit_splice(*t, dpos, tb, rep);
 	return true;
 }
