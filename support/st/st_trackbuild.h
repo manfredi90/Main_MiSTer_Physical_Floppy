@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include <vector>
+#include <utility>
 #include "st_mfmt.h"
 
 class TrackBuilder
@@ -63,6 +64,25 @@ public:
 	void set_extra_cells(int k) { m_extra = (k < 0) ? 0 : (k > 15 ? 15 : k); }
 	int extra_cells() const { return m_extra; }
 
+	// Phase jumps inside the track: k cells inserted (1..15) or removed
+	// (-1..-15) before byte pos. A protection mastered in several passes has such splices; a
+	// field read across one continues out of phase (Turrican tracks 7-10).
+	void add_jump(int pos, int k);
+	void remove_jump(int pos);
+	void clear_jumps() { m_jumps.clear(); }
+	int jumps() const { return (int)m_jumps.size(); }
+
+	// The whole turn as cells: cell values, weak cells, cell length (ns), and
+	// the first cell of every byte. Used by encode() and by format
+	// converters that check how a field reads.
+	struct Cells
+	{
+		std::vector<uint8_t> bit, weak;
+		std::vector<float> ns;
+		std::vector<int> byte_cell;
+	};
+	void build_cells(Cells &out) const;
+
 	// Revolution time used to size the bytes without an explicit time.
 	// Default 200 ms (300 RPM).
 	void set_revolution_ns(double ns) { m_rev_ns = ns; }
@@ -89,6 +109,8 @@ private:
 	bool   m_hd = false;
 	double m_rev_ns = 200000000.0;
 	int    m_extra = 0;
+	std::vector<std::pair<int, int>> m_jumps;   // sorted by position
+	double free_byte_ns() const;
 };
 
 // CRC-CCITT as computed by the WD1772 (init 0xFFFF, poly 0x1021)

@@ -182,6 +182,12 @@ static int check_track(const StxImage &img, int cyl, int head, const char *outdi
 			}
 			r.checks++;
 			if (diff) r.fail("sector %d: %d data bytes differ", s, diff);
+			if (verbose > 2)
+			{
+				printf("  sector %d (id %02x) reads:", s, sec.id[2]);
+				for (int k = 0; k < sec.size; k++) printf("%s%02x", k % 32 ? " " : "\n    ", d.data[k]);
+				printf("\n");
+			}
 			if (diff && verbose > 1)
 			{
 				int k0 = 0;
@@ -286,6 +292,7 @@ static int check_track(const StxImage &img, int cyl, int head, const char *outdi
 		snprintf(line + strlen(line), sizeof(line) - strlen(line), " sectors=%d/%zu", ns, ids.size());
 		if (rep.overlaps) snprintf(line + strlen(line), sizeof(line) - strlen(line), " nested=%d", rep.overlaps);
 		if (rep.splice_cells) snprintf(line + strlen(line), sizeof(line) - strlen(line), " splice=+%d", rep.splice_cells);
+		if (rep.jumps) snprintf(line + strlen(line), sizeof(line) - strlen(line), " jumps=%d", rep.jumps);
 		// nested fields inside a fuzzy sector are read one bit off by it (HLS): expected
 		bool any_fuzzy = false;
 		if (t) for (auto &x : t->sectors) if (x.fuzzy) any_fuzzy = true;

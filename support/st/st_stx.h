@@ -99,6 +99,7 @@ struct StxBuildReport
 	int overlap_mismatch = 0;         // ... and changing that data
 	bool image_ignored = false;       // track image unusable, rebuilt from the sectors
 	int splice_cells = 0;             // extra cells at the end of the turn (write splice)
+	int jumps = 0;                    // phase jumps found inside the track
 	bool unformatted = false;
 };
 

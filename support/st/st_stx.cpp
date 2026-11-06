@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <algorithm>
 #include "st_stx.h"
 
 static inline uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
@@ -385,18 +386,135 @@ static void put_owned(TrackBuilder &tb, int pos, uint8_t v, uint8_t owner, uint8
 }
 
 
-// Byte k of a field whose first data byte starts at cell c0, decoded from
-// MFMT cells (data bits are the odd cells), wrapping at the end of the turn
-static uint8_t cells_byte(const uint8_t *cells, uint32_t ncells, uint32_t c0, int k)
+// How a sector's data field reads on the cells: number of bytes equal to the
+// STX (stable bits only), and the first differing byte. The WD keeps the byte
+// grid it took from the data mark, so after a phase jump it reads shifted.
+static int read_score(const TrackBuilder::Cells &cs, int c0, const StxSector &sec, int *first_bad)
 {
-	const uint16_t *w = (const uint16_t *)cells;
-	uint8_t v = 0;
-	for (int i = 0; i < 8; i++)
+	int total = (int)cs.bit.size(), eq = 0;
+	*first_bad = sec.size;
+	for (int i = 0; i < sec.size; i++)
 	{
-		uint32_t c = (c0 + 16 * k + 2 * i + 1) % ncells;
-		v = (uint8_t)((v << 1) | ((w[c >> 4] >> (15 - (c & 15))) & 1));
+		uint8_t v = 0, wk = 0;
+		for (int k = 0; k < 8; k++)
+		{
+			int c = (c0 + 16 * i + 2 * k + 1) % total;
+			v = (uint8_t)((v << 1) | cs.bit[c]);
+			wk = (uint8_t)((wk << 1) | cs.weak[c]);
+		}
+		uint8_t m = (uint8_t)((sec.fuzzy ? sec.fuzzy[i] : 0xFF) & ~wk);
+		if (((v ^ sec.data[i]) & m) == 0) eq++;
+		else if (*first_bad == sec.size) *first_bad = i;
 	}
-	return v;
+	return eq;
+}
+
+static bool is_rot4e(uint8_t v)
+{
+	static const uint8_t rot4e[] = { 0x4e, 0x21, 0x9c, 0x42, 0x39, 0x84, 0x72, 0x09,
+	                                 0xe4, 0x12, 0xc9, 0x24, 0x93, 0x48, 0x27, 0x90 };
+	for (uint8_t x : rot4e) if (v == x) return true;
+	return false;
+}
+
+// Bytes a protected sector recorded after a phase jump are its out-of-phase
+// view of the track, not the track itself. Where they are still its own
+// (no other field was written there) they become the gap they show: runs
+// of FF become 00, of 4E rotations 4E, and other bytes carry on the gap or
+// preamble before them (the byte that straddles a sync mark, e.g. "fe").
+static void unshift_owned(TrackBuilder &tb, int from, int to, uint8_t owner)
+{
+	uint8_t last = 0x4E;
+	for (int i = from; i < to; i++)
+	{
+		TrackBuilder::Byte &b = tb.at(i);
+		if (b.owner != owner) { last = b.mark ? last : b.value; continue; }
+		uint8_t v = b.value;
+		uint8_t r = (v == 0xFF || v == 0x00) ? 0x00 : is_rot4e(v) ? 0x4E : last;
+		tb.put(i, r, owner);
+		tb.set_weak(i, 0);
+		last = r;
+	}
+}
+
+struct Span { int from, to; };   // [from, to) in track bytes, may exceed the size (wrap)
+
+static bool inside(const std::vector<Span> &spans, int pos, int n)
+{
+	for (const Span &s : spans)
+		for (int w = -1; w <= 1; w++)
+		{
+			int p = pos + w * n;
+			if (p > s.from && p < s.to) return true;
+		}
+	return false;
+}
+
+// Protected sectors (bad CRC) whose data does not read as recorded may cross
+// splices of a track mastered in several passes: the original WD went on
+// with its old byte grid and read what follows out of phase (Turrican tracks
+// 7-10: sector 0 reads the data mark and data of sector 16 one cell off, and
+// sector 16 reads the ID of sector 1 off phase). Search, just before the
+// first differing byte, the jump (position and 1..15 cells) that makes the
+// sector read as recorded, without cutting a sound sector's fields.
+static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, TrackBuilder &tb, StxBuildReport *rep)
+{
+	int n = tb.size(), ns = (int)t.sectors.size();
+	std::vector<Span> keep;
+	for (int s = 0; s < ns; s++)
+	{
+		const StxSector &sec = t.sectors[s];
+		keep.push_back(Span{ hpos[s], hpos[s] + 10 });
+		bool prot = (sec.status & STX_SECT_CRC_ERROR) || sec.fuzzy;
+		if (sec.data && dpos[s] >= 0 && !prot) keep.push_back(Span{ dpos[s], dpos[s] + 6 + sec.size });
+	}
+
+	std::vector<int> order;
+	for (int s = 0; s < ns; s++)
+	{
+		const StxSector &sec = t.sectors[s];
+		if (sec.data && dpos[s] >= 0 && (sec.status & STX_SECT_CRC_ERROR)) order.push_back(s);
+	}
+	std::sort(order.begin(), order.end(), [&](int a, int b) { return dpos[a] < dpos[b]; });
+
+	TrackBuilder::Cells cs;
+	for (int s : order)
+	{
+		const StxSector &sec = t.sectors[s];
+		uint8_t owner = (uint8_t)(s < 254 ? s + 1 : 255);
+		int start = dpos[s] + 4;
+		for (int round = 0; round < 8; round++)
+		{
+			tb.build_cells(cs);
+			int bad, score = read_score(cs, cs.byte_cell[tb.wrap(start)], sec, &bad);
+			if (bad >= sec.size) break;
+
+			int best_score = score, best_pos = -1, best_k = 0, best_bad = bad;
+			// a splice is at a boundary (gap / preamble / field), up to 64 bytes
+			// before the first byte that reads differently
+			for (int b = bad > 64 ? bad - 64 : 1; b <= bad; b++)
+			{
+				int pos = start + b;
+				if (pos >= n || inside(keep, pos, n)) continue;   // the index splice is fit_splice's job
+				if (b != bad && tb.at(pos).value == tb.at(pos - 1).value && tb.at(pos).owner == tb.at(pos - 1).owner) continue;
+				for (int k = -15; k < 16; k++)
+				{
+					if (!k) continue;
+					TrackBuilder trial = tb;
+					trial.add_jump(pos, k);
+					unshift_owned(trial, pos, std::min(start + sec.size, n), owner);
+					trial.build_cells(cs);
+					int fb, sc = read_score(cs, cs.byte_cell[start], sec, &fb);
+					if (fb > best_bad || (fb == best_bad && sc > best_score)) { best_score = sc; best_pos = pos; best_k = k; best_bad = fb; }
+				}
+			}
+			// keep a jump only if the sector now reads as recorded much further on
+			if (best_pos < 0 || best_bad - bad < 8 || best_score <= score) break;
+			tb.add_jump(best_pos, best_k);
+			unshift_owned(tb, best_pos, std::min(start + sec.size, n), owner);
+			if (rep) rep->jumps++;
+		}
+	}
 }
 
 // A sector whose data runs past the index was read by the original WD
@@ -414,24 +532,14 @@ static void fit_splice(const StxTrack &t, const std::vector<int> &dpos, TrackBui
 	}
 	if (cross.empty()) return;
 
-	std::vector<uint8_t> meta(ST_MFMT_META_BYTES), cells(ST_MFMT_CELLS_BYTES);
+	TrackBuilder::Cells cs;
 	int best_k = 0, best_score = -1;
 	for (int k = 0; k < 16; k++)
 	{
 		tb.set_extra_cells(k);
-		tb.encode(0, 0, meta.data(), cells.data());
-		uint32_t nc = ((const st_mfmt_header *)meta.data())->cell_count;
-		int score = 0;
-		for (int s : cross)
-		{
-			const StxSector &sec = t.sectors[s];
-			uint32_t c0 = (uint32_t)(dpos[s] + 4) * 16;
-			for (int i = 0; i < sec.size; i++)
-			{
-				uint8_t m = sec.fuzzy ? sec.fuzzy[i] : 0xFF;
-				if (((cells_byte(cells.data(), nc, c0, i) ^ sec.data[i]) & m) == 0) score++;
-			}
-		}
+		tb.build_cells(cs);
+		int score = 0, fb;
+		for (int s : cross) score += read_score(cs, cs.byte_cell[dpos[s] + 4], t.sectors[s], &fb);
 		if (score > best_score) { best_score = score; best_k = k; }
 	}
 	tb.set_extra_cells(best_k);
@@ -668,5 +776,6 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 	}
 
 	fit_splice(*t, dpos, tb, rep);
+	fit_jumps(*t, hpos, dpos, tb, rep);
 	return true;
 }
