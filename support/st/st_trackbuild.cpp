@@ -32,6 +32,7 @@ void TrackBuilder::reset(int len, uint8_t fill_value)
 	m_formatted = true;
 	m_hd = false;
 	m_rev_ns = 200000000.0;
+	m_extra = 0;
 }
 
 void TrackBuilder::put(int pos, uint8_t value, uint8_t owner, uint8_t mark)
@@ -138,9 +139,9 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 
 	uint16_t flags = ST_MFMT_F_FORMATTED | (m_hd ? ST_MFMT_F_HD : 0);
 	int n = (int)m_bytes.size();
-	if (n > ST_MFMT_MAX_CELLS / 16)
+	if (n > ST_MFMT_MAX_CELLS / 16 - 1)
 	{
-		n = ST_MFMT_MAX_CELLS / 16;
+		n = ST_MFMT_MAX_CELLS / 16 - 1;
 		flags |= ST_MFMT_F_TRUNCATED;
 	}
 
@@ -242,7 +243,21 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 	hdr->pool_words = (uint16_t)pool_used;
 	if (nweak) flags |= ST_MFMT_F_WEAK;
 
-	hdr->cell_count = (uint32_t)n * 16;
+	// extra cells at the splice: the last cells of the first word, so the
+	// gap at the start of the track simply continues across the splice
+	// (only its phase changes, as on a real track)
+	if (m_extra)
+	{
+		cw[n] = (uint16_t)(cw[0] << (16 - m_extra));
+		// the first cell of the track now follows the last extra cell: apply
+		// the MFM clock rule to it again (1 only between two 0 cells)
+		int before = (cw[n] >> (16 - m_extra)) & 1;
+		int after = (cw[0] >> 14) & 1;
+		if (!(cw[0] == 0x4489 || cw[0] == 0x5224))
+			cw[0] = (uint16_t)((cw[0] & 0x7FFF) | ((!before && !after) ? 0x8000 : 0));
+		hdr->rev_time_ns += (uint32_t)(m_extra * free_byte / 16.0);
+	}
+	hdr->cell_count = (uint32_t)n * 16 + m_extra;
 	hdr->flags = flags;
 	return true;
 }

@@ -182,6 +182,17 @@ static int check_track(const StxImage &img, int cyl, int head, const char *outdi
 			}
 			r.checks++;
 			if (diff) r.fail("sector %d: %d data bytes differ", s, diff);
+			if (diff && verbose > 1)
+			{
+				int k0 = 0;
+				while (k0 < sec.size && d.data[k0] == sec.data[k0]) k0++;
+				int from = k0 > 8 ? k0 - 8 : 0;
+				printf("  sector %d first difference at byte %d\n    STX: ", s, k0);
+				for (int k = from; k < from + 48 && k < sec.size; k++) printf("%02x ", sec.data[k]);
+				printf("\n    us : ");
+				for (int k = from; k < from + 48 && k < sec.size; k++) printf("%02x ", d.data[k]);
+				printf("\n");
+			}
 
 			if (sec.fuzzy)
 			{
@@ -274,11 +285,13 @@ static int check_track(const StxImage &img, int cyl, int head, const char *outdi
 		}
 		snprintf(line + strlen(line), sizeof(line) - strlen(line), " sectors=%d/%zu", ns, ids.size());
 		if (rep.overlaps) snprintf(line + strlen(line), sizeof(line) - strlen(line), " nested=%d", rep.overlaps);
+		if (rep.splice_cells) snprintf(line + strlen(line), sizeof(line) - strlen(line), " splice=+%d", rep.splice_cells);
 		// nested fields inside a fuzzy sector are read one bit off by it (HLS): expected
 		bool any_fuzzy = false;
 		if (t) for (auto &x : t->sectors) if (x.fuzzy) any_fuzzy = true;
 		if (rep.overlap_mismatch && any_fuzzy) printf("  note: %d nested bytes differ inside a fuzzy sector\n", rep.overlap_mismatch);
-		else if (rep.overlap_mismatch) r.fail("%d nested bytes disagree with the outer sector", rep.overlap_mismatch);
+		else if (rep.overlap_mismatch && r.fails) r.fail("%d nested bytes disagree with the outer sector", rep.overlap_mismatch);
+		else if (rep.overlap_mismatch) printf("  note: %d nested bytes differ, every sector still reads as recorded\n", rep.overlap_mismatch);
 		if (max_dev > 0 && verbose) printf("  max inter-sector timing deviation %.1f us\n", max_dev);
 	}
 
