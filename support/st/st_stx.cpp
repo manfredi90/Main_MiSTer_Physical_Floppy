@@ -500,9 +500,11 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 		for (int i = 0; i < 3; i++)
 		{
 			put_owned(tb, d + i, 0xA1, owner, TrackBuilder::MARK_A1, rep);
+			tb.set_weak(d + i, 0);
 			crc = st_crc16(crc, 0xA1);
 		}
 		put_owned(tb, d + 3, dam, owner, 0, rep);
+		tb.set_weak(d + 3, 0);
 		crc = st_crc16(crc, dam);
 
 		for (int i = 0; i < sec.size; i++)
@@ -536,6 +538,8 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 		}
 		put_owned(tb, d + 4 + sec.size, crc >> 8, owner, 0, rep);
 		put_owned(tb, d + 5 + sec.size, crc & 0xFF, owner, 0, rep);
+		tb.set_weak(d + 4 + sec.size, 0);
+		tb.set_weak(d + 5 + sec.size, 0);
 	}
 
 	// pass 2: ID fields on top
@@ -557,9 +561,13 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 		// an ID nested in another sector's data normally carries the same byte
 		// values (the protection was mastered that way); differences are
 		// counted in rep->overlap_mismatch
+		// an ID listed by the STX was readable, so it is never weak, even when
+		// it lies inside a fuzzy sector's data (OutRun, HLS protection: the
+		// fuzzy sector 0B reads the gap and the ID of sector 6 one bit off)
 		for (int i = 0; i < 3; i++) put_owned(tb, h + i, 0xA1, owner, TrackBuilder::MARK_A1, rep);
 		put_owned(tb, h + 3, 0xFE, owner, 0, rep);
 		for (int i = 0; i < 6; i++) put_owned(tb, h + 4 + i, id[i], owner, 0, rep);
+		for (int i = 0; i < 10; i++) tb.set_weak(h + i, 0);
 	}
 
 	return true;
