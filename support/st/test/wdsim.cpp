@@ -165,6 +165,10 @@ std::vector<uint8_t> WdSim::read_track(size_t from) const
 	uint16_t shift = 0;
 	uint16_t raw = 0;
 	int count = 0;
+	// the shift register already holds the cells before 'from' (a real chip
+	// keeps seeing the disk), so a sync mark across the index is detected
+	if (from >= 16) for (size_t c = from - 16; c < from; c++) shift = (shift << 1) | m_cells[c].bit;
+	raw = shift;
 	for (size_t c = from; c < end; c++)
 	{
 		shift = (shift << 1) | m_cells[c].bit;
