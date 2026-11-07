@@ -59,6 +59,7 @@ struct StxTrack
 	int      image_size;
 	int      image_sync;      // sync position field (-1 if absent)
 	int      length;          // track length in bytes used for the rebuild
+	bool     bitpos_time;     // bit_position is a time (revision 2), else bits of the track (0)
 };
 
 class StxImage
@@ -108,6 +109,10 @@ struct StxBuildReport
 
 // Rebuild cylinder/head of an STX image into tb. Returns false if the track
 // is absent (tb is then set to an unformatted track).
+// position of a field from its bit_position: bytes of the track, ns from the index
+double stx_bitpos_bytes(const StxTrack &t, int bit_position);
+double stx_bitpos_ns(const StxTrack &t, int bit_position);
+
 bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, StxBuildReport *rep = nullptr);
 
 #endif
