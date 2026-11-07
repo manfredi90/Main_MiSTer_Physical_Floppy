@@ -62,6 +62,8 @@ static StFddSlot slots[ST_FDD_SLOTS];
 static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string log_buf;
 static bool log_started = false;
+static size_t log_total = 0;              // bytes logged this session
+#define ST_LOG_MAX  (32u * 1024 * 1024)   // stop there, the card is not a dump
 
 static void *log_thread(void *)
 {
@@ -94,6 +96,11 @@ static void st_log(const char *fmt, ...)
 	printf("STX: %s\n", line);
 
 	pthread_mutex_lock(&log_lock);
+	if (log_total >= ST_LOG_MAX)
+	{
+		pthread_mutex_unlock(&log_lock);
+		return;
+	}
 	if (!log_started)
 	{
 		log_started = true;
@@ -107,6 +114,8 @@ static void st_log(const char *fmt, ...)
 	log_buf += ts;
 	log_buf += line;
 	log_buf += '\n';
+	log_total += strlen(ts) + strlen(line) + 1;
+	if (log_total >= ST_LOG_MAX) log_buf += "log full, stopped\n";
 	pthread_mutex_unlock(&log_lock);
 }
 
