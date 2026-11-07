@@ -149,6 +149,7 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 		}
 		t.length = t.mfm_size / 8;
 		if (t.length < 5000 || t.length > 8000) t.length = 6250;
+		t.bitpos_time = false;
 		return true;
 	}
 
@@ -232,6 +233,7 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 	if (t.image) t.length = t.image_size;
 	else t.length = t.mfm_size;
 	if (t.length < 1000 || t.length > ST_MFMT_MAX_CELLS / 16) t.length = 6250;
+	t.bitpos_time = m_revision != 0;
 	return true;
 }
 
@@ -242,14 +244,25 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 #define NOMINAL_REV_NS   200000000.0
 #define NOMINAL_BYTE_NS  32000.0
 
-// bit_position is a time from the index in 4 us units (a bit at the
-// standard rate), 50000 per 200 ms turn whatever the length of the track:
-// on a track written faster or slower than standard (Turrican II, 6597
-// bytes; Afterburner, 6305) the bytes before a field are not bit_position / 8.
-static double bitpos_bytes(const StxTrack &t, int bit_position)
+// bit_position: Pasti revision 2 (and later tools) store a time from the
+// index in 4 us units, 50000 per 200 ms turn whatever the length of the
+// track; revision 0 counts the bits of the track itself (its read track
+// images line up with bit_position / 8 on tracks of any length). On a track
+// written faster or slower than standard the two differ by up to 5 % of a
+// turn (Turrican II: 6597 bytes; Ghouls'n Ghosts track 79: 5903).
+double stx_bitpos_bytes(const StxTrack &t, int bit_position)
 {
-	return bit_position * (double)t.length / 50000.0;
+	if (t.bitpos_time) return bit_position * (double)t.length / 50000.0;
+	return bit_position / 8.0;
 }
+
+double stx_bitpos_ns(const StxTrack &t, int bit_position)
+{
+	if (t.bitpos_time) return bit_position * 4000.0;
+	return bit_position * NOMINAL_REV_NS / (8.0 * t.length);
+}
+
+static double bitpos_bytes(const StxTrack &t, int bit_position) { return stx_bitpos_bytes(t, bit_position); }
 
 // Time to read data byte i of a sector, 0 if the sector uses standard timing
 static double sector_byte_ns(const StxSector &sec, int i)
