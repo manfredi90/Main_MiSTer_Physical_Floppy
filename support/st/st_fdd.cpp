@@ -98,7 +98,7 @@ int st_fdd_mount_hook(int index, const char *name, fileTYPE *f, int *writable)
 
 	slots[index].stx = img;
 	*writable = 0;   // writing to STX images is not supported yet
-	printf("STX: slot %d: %d cylinders, %d heads, revision %d\n", index, img->cylinders(), img->heads(), img->revision());
+	printf("STX: slot %d: %s, %d cylinders, %d heads, revision %d\n", index, name, img->cylinders(), img->heads(), img->revision());
 	return 1;
 }
 
@@ -135,6 +135,7 @@ int st_fdd_sd_service(int disk, int op, uint64_t lba, int sz, int ack)
 
 	if (op == 2)
 	{
+		printf("STX: drive %c write to lba %llx dropped\n", 'A' + disk, (unsigned long long)lba);
 		// writes are accepted and dropped (read-only image)
 		EnableIO();
 		spi_w(UIO_SECTOR_WR | ack);
@@ -151,10 +152,15 @@ int st_fdd_sd_service(int disk, int op, uint64_t lba, int sz, int ack)
 		int head = (lba >> 8) & 1;
 		int part = (lba >> ST_MFMT_LBA_PART_SHIFT) & 3;
 		diskled_on();
+		unsigned long t0 = GetTimer(0);
+		bool cached = s.tracks.count(cyl * 2 + head) != 0;
 		const StFddTrack &t = build(s, cyl, head);
+		if (part == ST_MFMT_PART_META)
+			printf("STX: drive %c track %d.%d %s (%lu ms)\n", 'A' + disk, cyl, head, cached ? "cached" : "built", GetTimer(0) - t0);
 		if (part == ST_MFMT_PART_META) memcpy(buf, t.meta.data(), sz < ST_MFMT_META_BYTES ? sz : ST_MFMT_META_BYTES);
 		else if (part == ST_MFMT_PART_CELLS) memcpy(buf, t.cells.data(), sz);
 	}
+	else printf("STX: drive %c sector request lba %llu (not a track)\n", 'A' + disk, (unsigned long long)lba);
 	// a sector request on a track image means an old core: it gets empty sectors
 
 	EnableIO();
