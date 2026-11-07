@@ -144,9 +144,13 @@ static const char *fdc_cmd_name(uint8_t c)
 
 void st_fdd_debug_poll()
 {
-	if (!slots[0].stx && !slots[1].stx) return;
+	// once an STX was mounted keep draining, also while the player swaps
+	// disks (nothing is mounted for a moment)
+	static bool seen = false;
+	if (slots[0].stx || slots[1].stx) seen = true;
+	if (!seen) return;
 
-	for (int n = 0; n < 32; n++)
+	for (int n = 0; n < 512; n++)
 	{
 		uint16_t w[8];
 		EnableIO();
@@ -197,7 +201,8 @@ void st_fdd_debug_poll()
 			break;
 		}
 		case 6:
-			st_log("%s image mounted (mask %u)", t, (unsigned)((pl >> 48) & 3));
+			st_log("%s image change (mask %u): %s%s", t, (unsigned)((pl >> 48) & 3),
+				(pl >> 50) & 1 ? "disk in" : "no disk", (pl >> 51) & 1 ? ", mfmt" : "");
 			break;
 		case 15:
 			st_log("%s %u events lost", t, (unsigned)(pl & 0xFFFF));
