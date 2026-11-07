@@ -100,6 +100,7 @@ struct StxBuildReport
 	bool image_ignored = false;       // track image unusable, rebuilt from the sectors
 	int splice_cells = 0;             // extra cells at the end of the turn (write splice)
 	int jumps = 0;                    // phase jumps found inside the track
+	int forced_cells = 0;             // cells set so that out-of-phase sectors read as recorded
 	bool unformatted = false;
 };
 
