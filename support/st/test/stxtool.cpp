@@ -58,7 +58,8 @@ static double expected_data_ns(const StxSector &s)
 		}
 		return t;
 	}
-	if (s.read_time) return s.read_time * 1000.0;
+	// the converter ignores read times far from the standard rate
+	if (s.read_time && s.read_time * 1000.0 / s.size > 32000.0 * 0.85 && s.read_time * 1000.0 / s.size < 32000.0 * 1.15) return s.read_time * 1000.0;
 	return 0;   // standard: no check
 }
 
