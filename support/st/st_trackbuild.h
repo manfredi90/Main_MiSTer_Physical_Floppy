@@ -72,6 +72,15 @@ public:
 	void clear_jumps() { m_jumps.clear(); }
 	int jumps() const { return (int)m_jumps.size(); }
 
+	// Single cells forced to a value, by position in the finished turn (as
+	// build_cells() numbers them, so set them after the last change of the
+	// layout). Lets a field read one cell out of phase carry its own bits
+	// where its data cells are another field's clock cells: no flux where
+	// both read 00, as on Turrican tracks 7-10.
+	void set_cell(int cell, int bit) { m_cell_set.emplace_back(cell, (uint8_t)(bit & 1)); }
+	void clear_cells() { m_cell_set.clear(); }
+	int forced_cells() const { return (int)m_cell_set.size(); }
+
 	// The whole turn as cells: cell values, weak cells, cell length (ns), and
 	// the first cell of every byte. Used by encode() and by format
 	// converters that check how a field reads.
@@ -110,6 +119,7 @@ private:
 	double m_rev_ns = 200000000.0;
 	int    m_extra = 0;
 	std::vector<std::pair<int, int>> m_jumps;   // sorted by position
+	std::vector<std::pair<int, uint8_t>> m_cell_set;
 	double free_byte_ns() const;
 };
 

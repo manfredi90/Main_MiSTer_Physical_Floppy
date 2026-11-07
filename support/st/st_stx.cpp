@@ -546,6 +546,82 @@ static void fit_splice(const StxTrack &t, const std::vector<int> &dpos, TrackBui
 	if (rep) rep->splice_cells = best_k;
 }
 
+// After the layout is final: a protected sector (bad CRC) that still reads
+// differently is read out of phase with the fields around it, so its data
+// cells are their clock cells. Set those cells to the recorded data bits
+// (a zero next to a zero clock is a stretch without flux, which the WD reads
+// as 0 in both phases). The fields of sound sectors and all IDs are left
+// alone; if anything that read right before reads worse after, nothing is
+// changed.
+static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, TrackBuilder &tb, StxBuildReport *rep)
+{
+	int ns = (int)t.sectors.size(), n = tb.size();
+	TrackBuilder::Cells cs;
+	tb.build_cells(cs);
+	int total = (int)cs.bit.size();
+	if (!total) return;
+
+	std::vector<uint8_t> lock(total, 0);
+	auto lock_bytes = [&](int from, int count) {
+		for (int b = from; b < from + count; b++)
+		{
+			int p = tb.wrap(b), c0 = cs.byte_cell[p];
+			int c1 = (p + 1 < n) ? cs.byte_cell[p + 1] : total;
+			for (int c = c0; c < c1; c++) lock[c] = 1;
+		}
+	};
+	std::vector<int> prot;
+	for (int s = 0; s < ns; s++)
+	{
+		const StxSector &sec = t.sectors[s];
+		lock_bytes(hpos[s] - 3, 13);
+		if (!sec.data || dpos[s] < 0) continue;
+		lock_bytes(dpos[s], 4);   // the data mark, also of out-of-phase sectors
+		if ((sec.status & STX_SECT_CRC_ERROR) && !sec.fuzzy) prot.push_back(s);
+		else lock_bytes(dpos[s], 6 + sec.size);
+	}
+	if (prot.empty()) return;
+
+	auto scores = [&](std::vector<int> &out) {
+		tb.build_cells(cs);
+		out.clear();
+		for (int s = 0; s < ns; s++)
+		{
+			const StxSector &sec = t.sectors[s];
+			int fb;
+			out.push_back(sec.data && dpos[s] >= 0 ? read_score(cs, cs.byte_cell[tb.wrap(dpos[s] + 4)], sec, &fb) : 0);
+		}
+	};
+	std::vector<int> before, after;
+	scores(before);
+
+	int forced = 0;
+	for (int s : prot)
+	{
+		const StxSector &sec = t.sectors[s];
+		tb.build_cells(cs);
+		int c0 = cs.byte_cell[tb.wrap(dpos[s] + 4)];
+		for (int i = 0; i < sec.size; i++)
+			for (int k = 0; k < 8; k++)
+			{
+				int c = (c0 + 16 * i + 2 * k + 1) % total;
+				int want = (sec.data[i] >> (7 - k)) & 1;
+				if (lock[c] || cs.weak[c] || cs.bit[c] == want) continue;
+				tb.set_cell(c, want);
+				forced++;
+			}
+	}
+	scores(after);
+	bool worse = false;
+	for (int s = 0; s < ns; s++)
+	{
+		bool p = std::find(prot.begin(), prot.end(), s) != prot.end();
+		if (p ? after[s] < before[s] : after[s] != before[s]) worse = true;
+	}
+	if (worse) { tb.clear_cells(); forced = 0; }
+	if (rep) rep->forced_cells = forced;
+}
+
 bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, StxBuildReport *rep)
 {
 	StxBuildReport dummy;
@@ -777,5 +853,6 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 
 	fit_splice(*t, dpos, tb, rep);
 	fit_jumps(*t, hpos, dpos, tb, rep);
+	fit_cells(*t, hpos, dpos, tb, rep);
 	return true;
 }

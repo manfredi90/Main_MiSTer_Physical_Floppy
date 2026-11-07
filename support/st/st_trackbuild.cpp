@@ -224,6 +224,9 @@ void TrackBuilder::build_cells(Cells &out) const
 		if (!m_bytes[0].mark)
 			out.bit[0] = (!out.bit.back() && !out.bit[1]) ? 1 : 0;
 	}
+
+	for (auto &f : m_cell_set)
+		if (f.first >= 0 && f.first < (int)out.bit.size()) out.bit[f.first] = f.second;
 }
 
 bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cells) const
