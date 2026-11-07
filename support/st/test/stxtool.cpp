@@ -217,7 +217,10 @@ static int check_track(const StxImage &img, int cyl, int head, const char *outdi
 						if ((d.data[i] ^ e.data[i]) & ~sec.fuzzy[i]) changed++;
 						if ((d.data[i] ^ e.data[i]) & sec.fuzzy[i]) wrong_stable++;
 					}
-					if (!changed) r.fail("sector %d: fuzzy bits did not change between reads", s);
+					// a fuzzy mask can be all stable (Xenon 2 track 0 sector 6)
+					int nfuzzy = 0;
+					for (int i = 0; i < sec.size; i++) if (sec.fuzzy[i] != 0xFF) nfuzzy++;
+					if (!changed && nfuzzy) r.fail("sector %d: fuzzy bits did not change between reads", s);
 					if (wrong_stable) r.fail("sector %d: %d stable bytes changed between reads", s, wrong_stable);
 					if (verbose) printf("  sector %d fuzzy: %d bytes changed between two reads\n", s, changed);
 				}
