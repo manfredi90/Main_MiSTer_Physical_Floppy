@@ -444,6 +444,51 @@ static void unshift_owned(TrackBuilder &tb, int from, int to, uint8_t owner)
 	}
 }
 
+// Cells fit_cells() may not force: IDs, data marks and the fields of sectors
+// without an intentional CRC error.
+static void lock_cells(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, const TrackBuilder &tb, const TrackBuilder::Cells &cs, std::vector<uint8_t> &lock)
+{
+	int n = tb.size(), total = (int)cs.bit.size();
+	lock.assign(total, 0);
+	auto lock_bytes = [&](int from, int count) {
+		for (int b = from; b < from + count; b++)
+		{
+			int p = tb.wrap(b), c0 = cs.byte_cell[p];
+			int c1 = (p + 1 < n) ? cs.byte_cell[p + 1] : total;
+			for (int c = c0; c < c1; c++) lock[c] = 1;
+		}
+	};
+	for (int s = 0; s < (int)t.sectors.size(); s++)
+	{
+		const StxSector &sec = t.sectors[s];
+		lock_bytes(hpos[s] - 3, 13);
+		if (!sec.data || dpos[s] < 0) continue;
+		lock_bytes(dpos[s], 4);
+		if (!(sec.status & STX_SECT_CRC_ERROR)) lock_bytes(dpos[s], 6 + sec.size);
+	}
+}
+
+// read_score() counting as equal the bytes fit_cells() can make equal
+static int read_score_fix(const TrackBuilder::Cells &cs, const std::vector<uint8_t> &lock, int c0, const StxSector &sec, int *first_bad)
+{
+	int total = (int)cs.bit.size(), eq = 0;
+	*first_bad = sec.size;
+	for (int i = 0; i < sec.size; i++)
+	{
+		bool ok = true;
+		for (int k = 0; k < 8 && ok; k++)
+		{
+			int c = (c0 + 16 * i + 2 * k + 1) % total;
+			if (cs.weak[c]) continue;
+			if (sec.fuzzy && !((sec.fuzzy[i] >> (7 - k)) & 1)) continue;
+			if (cs.bit[c] != ((sec.data[i] >> (7 - k)) & 1) && lock[c]) ok = false;
+		}
+		if (ok) eq++;
+		else if (*first_bad == sec.size) *first_bad = i;
+	}
+	return eq;
+}
+
 struct Span { int from, to; };   // [from, to) in track bytes, may exceed the size (wrap)
 
 static bool inside(const std::vector<Span> &spans, int pos, int n)
@@ -492,28 +537,65 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 		int start = dpos[s] + 4;
 		for (int round = 0; round < 8; round++)
 		{
+			std::vector<uint8_t> lock;
 			tb.build_cells(cs);
-			int bad, score = read_score(cs, cs.byte_cell[tb.wrap(start)], sec, &bad);
+			lock_cells(t, hpos, dpos, tb, cs, lock);
+			int bad, score = read_score_fix(cs, lock, cs.byte_cell[tb.wrap(start)], sec, &bad);
 			if (bad >= sec.size) break;
 
-			int best_score = score, best_pos = -1, best_k = 0, best_bad = bad;
 			// a splice is at a boundary (gap / preamble / field), up to 64 bytes
-			// before the first byte that reads differently
+			// before the first byte that reads differently. Every candidate is
+			// first scored on the cells shifted in place (cheap: the ARM of the
+			// DE10-Nano would need seconds to rebuild the track for each); the
+			// best few are then built for real.
+			struct Cand { int pos, k, bad, score; };
+			std::vector<Cand> cands;
+			int total = (int)cs.bit.size(), c0 = cs.byte_cell[tb.wrap(start)];
 			for (int b = bad > 64 ? bad - 64 : 1; b <= bad; b++)
 			{
 				int pos = start + b;
 				if (pos >= n || inside(keep, pos, n)) continue;   // the index splice is fit_splice's job
 				if (b != bad && tb.at(pos).value == tb.at(pos - 1).value && tb.at(pos).owner == tb.at(pos - 1).owner) continue;
+				int J = cs.byte_cell[pos];
 				for (int k = -15; k < 16; k++)
 				{
-					if (!k) continue;
-					TrackBuilder trial = tb;
-					trial.add_jump(pos, k);
-					unshift_owned(trial, pos, std::min(start + sec.size, n), owner);
-					trial.build_cells(cs);
-					int fb, sc = read_score(cs, cs.byte_cell[start], sec, &fb);
-					if (fb > best_bad || (fb == best_bad && sc > best_score)) { best_score = sc; best_pos = pos; best_k = k; best_bad = fb; }
+					if (!k || J < 16) continue;
+					int nt = total + k, thr = k > 0 ? J : J + k;
+					auto src = [&](int c) {
+						if (c < thr) return c;
+						if (k > 0 && c < J + k) return J - 16 + (c - J) % 16;
+						return c - k;
+					};
+					int fb = sec.size, sc = 0;
+					for (int i = 0; i < sec.size; i++)
+					{
+						bool ok = true;
+						for (int q = 0; q < 8 && ok; q++)
+						{
+							int c = src((c0 + 16 * i + 2 * q + 1) % nt);
+							if (c < 0 || c >= total || cs.weak[c]) continue;
+							if (sec.fuzzy && !((sec.fuzzy[i] >> (7 - q)) & 1)) continue;
+							if (cs.bit[c] != ((sec.data[i] >> (7 - q)) & 1) && lock[c]) ok = false;
+						}
+						if (ok) sc++;
+						else if (fb == sec.size) fb = i;
+					}
+					if (fb > bad) cands.push_back(Cand{ pos, k, fb, sc });
 				}
+			}
+			std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b2) { return a.bad != b2.bad ? a.bad > b2.bad : a.score > b2.score; });
+			if (cands.size() > 4) cands.resize(4);
+
+			int best_score = score, best_pos = -1, best_k = 0, best_bad = bad;
+			for (const Cand &cd : cands)
+			{
+				TrackBuilder trial = tb;
+				trial.add_jump(cd.pos, cd.k);
+				unshift_owned(trial, cd.pos, std::min(start + sec.size, n), owner);
+				trial.build_cells(cs);
+				lock_cells(t, hpos, dpos, trial, cs, lock);
+				int fb, sc = read_score_fix(cs, lock, cs.byte_cell[start], sec, &fb);
+				if (fb > best_bad || (fb == best_bad && sc > best_score)) { best_score = sc; best_pos = cd.pos; best_k = cd.k; best_bad = fb; }
 			}
 			// keep a jump only if the sector now reads as recorded much further on
 			if (best_pos < 0 || best_bad - bad < 8 || best_score <= score) break;
@@ -562,30 +644,19 @@ static void fit_splice(const StxTrack &t, const std::vector<int> &dpos, TrackBui
 // changed.
 static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, TrackBuilder &tb, StxBuildReport *rep)
 {
-	int ns = (int)t.sectors.size(), n = tb.size();
+	int ns = (int)t.sectors.size();
 	TrackBuilder::Cells cs;
 	tb.build_cells(cs);
 	int total = (int)cs.bit.size();
 	if (!total) return;
 
-	std::vector<uint8_t> lock(total, 0);
-	auto lock_bytes = [&](int from, int count) {
-		for (int b = from; b < from + count; b++)
-		{
-			int p = tb.wrap(b), c0 = cs.byte_cell[p];
-			int c1 = (p + 1 < n) ? cs.byte_cell[p + 1] : total;
-			for (int c = c0; c < c1; c++) lock[c] = 1;
-		}
-	};
+	std::vector<uint8_t> lock;
+	lock_cells(t, hpos, dpos, tb, cs, lock);
 	std::vector<int> prot;
 	for (int s = 0; s < ns; s++)
 	{
 		const StxSector &sec = t.sectors[s];
-		lock_bytes(hpos[s] - 3, 13);
-		if (!sec.data || dpos[s] < 0) continue;
-		lock_bytes(dpos[s], 4);   // the data mark, also of out-of-phase sectors
-		if ((sec.status & STX_SECT_CRC_ERROR) && !sec.fuzzy) prot.push_back(s);
-		else lock_bytes(dpos[s], 6 + sec.size);
+		if (sec.data && dpos[s] >= 0 && (sec.status & STX_SECT_CRC_ERROR)) prot.push_back(s);
 	}
 	if (prot.empty()) return;
 
@@ -613,6 +684,12 @@ static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std
 			{
 				int c = (c0 + 16 * i + 2 * k + 1) % total;
 				int want = (sec.data[i] >> (7 - k)) & 1;
+				if (sec.fuzzy && !((sec.fuzzy[i] >> (7 - k)) & 1))
+				{
+					// a fuzzy bit: its cell must read randomly
+					if (!lock[c] && !cs.weak[c]) { tb.set_weak_cell(c); forced++; }
+					continue;
+				}
 				if (lock[c] || cs.weak[c] || cs.bit[c] == want) continue;
 				tb.set_cell(c, want);
 				forced++;
@@ -667,6 +744,75 @@ static int bad_fields(const StxTrack &t, const std::vector<int> &hpos, const std
 		if (!ok) bad++;
 	}
 	return bad;
+}
+
+// Fields nested in the data of another sector (sector in sector protections,
+// 70 overlapping sectors on track 79 of Bubble Ghost, Light Corridor, Ishar)
+// are shown by that data byte for byte. Where the data of the sector before
+// shows the sync marks and mark of a nested ID or data mark one to three
+// bytes away (an ID up to 16) from where it was placed, the field moves there: the recorded
+// data of the outer sector is more exact than the read track image or the
+// timing the position came from.
+static void align_nested(const StxTrack &t, std::vector<int> &hpos, std::vector<int> &dpos, int n)
+{
+	int ns = (int)t.sectors.size();
+	auto wrap = [n](int p) { p %= n; return p < 0 ? p + n : p; };
+	std::vector<int> order;
+	for (int s = 0; s < ns; s++) if (dpos[s] >= 0) order.push_back(s);
+	std::sort(order.begin(), order.end(), [&](int a, int b) { return dpos[a] < dpos[b]; });
+
+	// the nearest sector before pos whose data covers it
+	auto outer = [&](int pos, int self) {
+		int best = -1, best_d = n;
+		for (int a : order)
+		{
+			if (a == self || !t.sectors[a].data) continue;
+			int d = wrap(pos - (dpos[a] + 4));
+			if (d < t.sectors[a].size && d < best_d) { best = a; best_d = d; }
+		}
+		return best;
+	};
+	auto match = [&](const StxSector &a, int off, const uint8_t *pat, int len) {
+		if (off < 0 || off + len > a.size) return false;
+		for (int i = 0; i < len; i++) if (a.data[off + i] != pat[i]) return false;
+		return true;
+	};
+	for (int b : order)
+	{
+		const StxSector &sb = t.sectors[b];
+		// the ID, then the data mark of b
+		for (int field = 0; field < 2; field++)
+		{
+			int pos = field ? dpos[b] : hpos[b];
+			if (field == 0 && (sb.status & STX_SECT_RNF)) continue;
+			int a = outer(pos, b);
+			if (a < 0) continue;
+			uint8_t pat[8] = { 0xA1, 0xA1, 0xA1, 0xFE };
+			int len = 4;
+			if (field) pat[3] = (sb.status & STX_SECT_DELETED) ? 0xF8 : 0xFB;
+			else { memcpy(pat + 4, sb.id, 4); len = 8; }
+			int off = wrap(pos - (dpos[a] + 4));
+			if (match(t.sectors[a], off, pat, len)) continue;
+			// an ID (with its track and sector) is distinctive enough to look
+			// further: one missing from the image was placed by time only
+			int range = field ? 3 : 16;
+			for (int k = 1; k <= range; k++)
+			{
+				int dk = 0;
+				if (match(t.sectors[a], off + k, pat, len)) dk = k;
+				else if (match(t.sectors[a], off - k, pat, len)) dk = -k;
+				if (!dk) continue;
+				if (field) dpos[b] = wrap(dpos[b] + dk);
+				else
+				{
+					// the data mark keeps its distance from the ID, then is checked itself
+					hpos[b] = wrap(hpos[b] + dk);
+					dpos[b] = wrap(dpos[b] + dk);
+				}
+				break;
+			}
+		}
+	}
 }
 
 static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, StxBuildReport *rep, bool allow_image)
@@ -810,6 +956,8 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		}
 		dpos[s] = tb.wrap(hpos[s] + off);
 	}
+
+	align_nested(*t, hpos, dpos, n);
 
 	// pass 0: standard preambles (only over gap bytes)
 	if (!use_image)
