@@ -530,6 +530,12 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 	std::sort(order.begin(), order.end(), [&](int a, int b) { return dpos[a] < dpos[b]; });
 
 	TrackBuilder::Cells cs;
+	// fixable bytes of all protected sectors: a jump for one must not cost the others
+	auto total_score = [&](const TrackBuilder::Cells &c, const std::vector<uint8_t> &lk) {
+		int sum = 0, fb;
+		for (int o : order) sum += read_score_fix(c, lk, c.byte_cell[tb.wrap(dpos[o] + 4)], t.sectors[o], &fb);
+		return sum;
+	};
 	for (int s : order)
 	{
 		const StxSector &sec = t.sectors[s];
@@ -542,6 +548,7 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 			lock_cells(t, hpos, dpos, tb, cs, lock);
 			int bad, score = read_score_fix(cs, lock, cs.byte_cell[tb.wrap(start)], sec, &bad);
 			if (bad >= sec.size) break;
+			int all_score = total_score(cs, lock);
 
 			// a splice is at a boundary (gap / preamble / field), up to 64 bytes
 			// before the first byte that reads differently. Every candidate is
@@ -586,20 +593,31 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 			std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b2) { return a.bad != b2.bad ? a.bad > b2.bad : a.score > b2.score; });
 			if (cands.size() > 4) cands.resize(4);
 
-			int best_score = score, best_pos = -1, best_k = 0, best_bad = bad;
+			// a sector read across the index also depends on the splice cells:
+			// after a jump they are fitted again
+			bool cross = start + sec.size > n;
+			int best_score = score, best_pos = -1, best_k = 0, best_bad = bad, best_extra = tb.extra_cells(), best_all = all_score;
 			for (const Cand &cd : cands)
 			{
 				TrackBuilder trial = tb;
 				trial.add_jump(cd.pos, cd.k);
 				unshift_owned(trial, cd.pos, std::min(start + sec.size, n), owner);
-				trial.build_cells(cs);
-				lock_cells(t, hpos, dpos, trial, cs, lock);
-				int fb, sc = read_score_fix(cs, lock, cs.byte_cell[start], sec, &fb);
-				if (fb > best_bad || (fb == best_bad && sc > best_score)) { best_score = sc; best_pos = cd.pos; best_k = cd.k; best_bad = fb; }
+				for (int e = cross ? 0 : tb.extra_cells(); e <= (cross ? 15 : tb.extra_cells()); e++)
+				{
+					trial.set_extra_cells(e);
+					trial.build_cells(cs);
+					lock_cells(t, hpos, dpos, trial, cs, lock);
+					int fb, sc = read_score_fix(cs, lock, cs.byte_cell[start], sec, &fb);
+					int all = total_score(cs, lock);
+					if (fb > best_bad || (fb == best_bad && (all > best_all || (all == best_all && sc > best_score))))
+					{ best_score = sc; best_pos = cd.pos; best_k = cd.k; best_bad = fb; best_extra = e; best_all = all; }
+				}
 			}
 			// keep a jump only if the sector now reads as recorded much further on
-			if (best_pos < 0 || best_bad - bad < 8 || best_score <= score) break;
+			if (best_pos < 0 || best_bad - bad < 8 || best_score <= score || best_all <= all_score) break;
 			tb.add_jump(best_pos, best_k);
+			tb.set_extra_cells(best_extra);
+			if (rep) rep->splice_cells = best_extra;
 			unshift_owned(tb, best_pos, std::min(start + sec.size, n), owner);
 			if (rep) rep->jumps++;
 		}
@@ -725,8 +743,29 @@ static int bad_fields(const StxTrack &t, const std::vector<int> &hpos, const std
 		const StxSector &sec = t.sectors[s];
 		if (!(sec.status & STX_SECT_RNF))
 		{
-			int c0 = cs.byte_cell[tb.wrap(hpos[s] + 4)];
-			for (int i = 0; i < 4; i++) if (byte_at(c0, i) != sec.id[i]) { bad++; break; }
+			// three A1 sync marks, FE, the ID and a CRC that is right unless
+			// the STX says it is not
+			int h0 = cs.byte_cell[tb.wrap(hpos[s])];
+			bool ok = true;
+			for (int i = 0; i < 3 && ok; i++)
+			{
+				uint16_t w = 0;
+				for (int k = 0; k < 16; k++) w = (uint16_t)((w << 1) | cs.bit[(h0 + 16 * i + k) % total]);
+				if (w != 0x4489) ok = false;
+			}
+			if (ok && byte_at(h0, 3) != 0xFE) ok = false;
+			uint16_t crc = 0xFFFF;
+			for (int i = 0; i < 3; i++) crc = st_crc16(crc, 0xA1);
+			crc = st_crc16(crc, 0xFE);
+			for (int i = 0; i < 4 && ok; i++)
+			{
+				uint8_t v = byte_at(h0, 4 + i);
+				if (v != sec.id[i]) ok = false;
+				crc = st_crc16(crc, v);
+			}
+			bool crc_ok = ok && ((byte_at(h0, 8) << 8) | byte_at(h0, 9)) == crc;
+			if (ok && crc_ok != !(sec.status & STX_SECT_CRC_ERROR && sec.status & STX_SECT_RNF)) ok = false;
+			if (!ok) bad++;
 		}
 		if (!sec.data || dpos[s] < 0 || (sec.status & STX_SECT_CRC_ERROR) || sec.fuzzy) continue;
 		int c0 = cs.byte_cell[tb.wrap(dpos[s] + 4)];
