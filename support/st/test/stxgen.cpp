@@ -304,6 +304,9 @@ int main(int argc, char **argv)
 		t.mfm_size = 6500;
 		int p = 30;
 		for (int s = 1; s <= 11; s++) { t.sectors.push_back(sec(8, 0, s, 2, p, 800 + s)); p += 10 + 22 + 12 + 4 + 512 + 2 + 2 + 12 - 6; }
+		// bit_position is a time (4 us units, 50000 per turn): the bytes of
+		// this track are shorter than standard
+		for (auto &g : t.sectors) g.bit_position = (uint16_t)(g.bit_position * 6250.0 / 6500.0 + 0.5);
 		tracks.push_back(t);
 	}
 

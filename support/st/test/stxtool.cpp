@@ -112,7 +112,7 @@ static int check_track(const StxImage &img, int cyl, int head, const char *outdi
 		for (int s = 0; s < ns; s++)
 		{
 			const StxSector &sec = t->sectors[s];
-			int expect = tb.wrap(sec.bit_position / 8 - 4 + rep.image_offset);
+			int expect = tb.wrap((int)floor(sec.bit_position * (double)t->length / 50000.0 + 0.5) - 4 + rep.image_offset);
 			int best = -1;
 			for (size_t i = 0; i < ids.size(); i++)
 			{
@@ -137,11 +137,11 @@ static int check_track(const StxImage &img, int cyl, int head, const char *outdi
 			}
 
 			// inter-sector timing as seen by a program that measures it
-			// (bit_position = fraction of a turn: 8 * length bits per revolution)
+			// (bit_position = time from the index in 4 us units)
 			if (prev_t >= 0 && (!t->image || rep.image_ignored))
 			{
 				double dt = id.t - prev_t;
-				double dexp = (sec.bit_position - prev_bp) * 200e6 / (8.0 * t->length);
+				double dexp = (sec.bit_position - prev_bp) * 4000.0;
 				if (dexp > 0)
 				{
 					double dev = fabs(dt - dexp) / 1000.0;
@@ -273,7 +273,7 @@ static int check_track(const StxImage &img, int cyl, int head, const char *outdi
 				printf("  image: size %d sync %d, headers found %d/%d, data found %d, offset %d\n", n, t->image_sync,
 					rep.headers_found_in_image, rep.sectors, rep.data_found_in_image, rep.image_offset);
 				for (int s2 = 0; s2 < ns; s2++) printf("   sec %d bitpos %d -> byte %d status %02x id %02x %02x %02x %02x\n", s2,
-					t->sectors[s2].bit_position, t->sectors[s2].bit_position / 8 - 4, t->sectors[s2].status,
+					t->sectors[s2].bit_position, (int)(t->sectors[s2].bit_position * (double)t->length / 50000.0) - 4, t->sectors[s2].status,
 					t->sectors[s2].id[0], t->sectors[s2].id[1], t->sectors[s2].id[2], t->sectors[s2].id[3]);
 				int run = -1;
 				for (int i = 0; i <= n && i <= (int)rt.size(); i++)

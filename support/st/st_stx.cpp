@@ -242,6 +242,15 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 #define NOMINAL_REV_NS   200000000.0
 #define NOMINAL_BYTE_NS  32000.0
 
+// bit_position is a time from the index in 4 us units (a bit at the
+// standard rate), 50000 per 200 ms turn whatever the length of the track:
+// on a track written faster or slower than standard (Turrican II, 6597
+// bytes; Afterburner, 6305) the bytes before a field are not bit_position / 8.
+static double bitpos_bytes(const StxTrack &t, int bit_position)
+{
+	return bit_position * (double)t.length / 50000.0;
+}
+
 // Time to read data byte i of a sector, 0 if the sector uses standard timing
 static double sector_byte_ns(const StxSector &sec, int i)
 {
@@ -912,7 +921,7 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		for (int s = 0; s < ns; s++)
 		{
 			const StxSector &sec = t->sectors[s];
-			int expect = sec.bit_position / 8 - 4;
+			int expect = (int)floor(bitpos_bytes(*t, sec.bit_position) + 0.5) - 4;
 			int p = have_delta ? find_header(*t, sec, expect + delta, 48) : find_header(*t, sec, expect, n / 2);
 			if (p < 0) continue;
 			if (!have_delta)
@@ -945,7 +954,7 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 				// placed by time, or on the sync marks of an ID field the image
 				// shows nearby with damaged contents (read out of phase): two ID
 				// fields a few bytes apart would hide each other
-				int e = t->sectors[s].bit_position / 8 - 4 + delta;
+				int e = (int)floor(bitpos_bytes(*t, t->sectors[s].bit_position) + 0.5) - 4 + delta;
 				hpos[s] = tb.wrap(e);
 				for (int d = 0; d <= 16; d++)
 				{
@@ -974,12 +983,10 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 	}
 	else
 	{
-		// bit_position is a time from the index: Hatari uses 4 us per data
-		// bit with a revolution of length * 32 us, which is the fraction
-		// bit_position / (8 * length) of a turn. Here a turn is 200 ms and
-		// the bytes with standard timing last free_byte, so a sector read
-		// slower or faster than standard moves the following ID fields by
-		// the equivalent number of bytes, to keep them on time.
+		// bit_position is a time from the index (see bitpos_bytes). Here a
+		// turn is 200 ms and the bytes with standard timing last free_byte, so
+		// a sector read slower or faster than standard moves the following ID
+		// fields by the equivalent number of bytes, to keep them on time.
 		double fixed = 0;
 		int fixed_bytes = 0;
 		for (const StxSector &sec : t->sectors)
@@ -991,13 +998,13 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		if (fixed_bytes && n > fixed_bytes) free_byte = (NOMINAL_REV_NS - fixed) / (n - fixed_bytes);
 		if (free_byte < NOMINAL_BYTE_NS * 0.85) free_byte = NOMINAL_BYTE_NS * 0.85;
 		if (free_byte > NOMINAL_BYTE_NS * 1.15) free_byte = NOMINAL_BYTE_NS * 1.15;
-		double unit = NOMINAL_REV_NS / n;   // time of one byte of bit_position
+		double unit = NOMINAL_REV_NS / n;   // average time of a byte of the track
 
 		double shift = 0;   // bytes
 		for (int s = 0; s < ns; s++)
 		{
 			const StxSector &sec = t->sectors[s];
-			double when = (sec.bit_position / 8.0 - 4) * unit;
+			double when = (bitpos_bytes(*t, sec.bit_position) - 4) * unit;
 			hpos[s] = tb.wrap((int)floor(when / free_byte - shift + 0.5));
 			double f = sector_fixed_ns(sec);
 			if (f > 0) shift += (f - sec.size * free_byte) / free_byte;
