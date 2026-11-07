@@ -691,6 +691,18 @@ static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std
 	std::vector<int> before, after;
 	scores(before);
 
+	// cells a protected sector reads as stable data: another one's fuzzy bit
+	// cannot make them random
+	std::vector<uint8_t> stable(total, 0);
+	for (int s : prot)
+	{
+		const StxSector &sec = t.sectors[s];
+		int c0 = cs.byte_cell[tb.wrap(dpos[s] + 4)];
+		for (int i = 0; i < sec.size; i++)
+			for (int k = 0; k < 8; k++)
+				if (!sec.fuzzy || ((sec.fuzzy[i] >> (7 - k)) & 1)) stable[(c0 + 16 * i + 2 * k + 1) % total] = 1;
+	}
+
 	int forced = 0;
 	for (int s : prot)
 	{
@@ -705,7 +717,7 @@ static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std
 				if (sec.fuzzy && !((sec.fuzzy[i] >> (7 - k)) & 1))
 				{
 					// a fuzzy bit: its cell must read randomly
-					if (!lock[c] && !cs.weak[c]) { tb.set_weak_cell(c); forced++; }
+					if (!lock[c] && !cs.weak[c] && !stable[c]) { tb.set_weak_cell(c); forced++; }
 					continue;
 				}
 				if (lock[c] || cs.weak[c] || cs.bit[c] == want) continue;
@@ -928,7 +940,30 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		mark_image_syncs(tb);
 		for (int s = 0; s < ns; s++)
 		{
-			if (!in_image[s]) hpos[s] = tb.wrap(t->sectors[s].bit_position / 8 - 4 + delta);
+			if (!in_image[s])
+			{
+				// placed by time, or on the sync marks of an ID field the image
+				// shows nearby with damaged contents (read out of phase): two ID
+				// fields a few bytes apart would hide each other
+				int e = t->sectors[s].bit_position / 8 - 4 + delta;
+				hpos[s] = tb.wrap(e);
+				for (int d = 0; d <= 16; d++)
+				{
+					int found = -1;
+					for (int sgn = -1; sgn <= 1 && found < 0; sgn += 2)
+					{
+						int p = tb.wrap(e + sgn * d);
+						const uint8_t *im = t->image;
+						if (is_garbled_sync(im[p]) && im[(p + 1) % n] == 0xA1 && im[(p + 2) % n] == 0xA1 && im[(p + 3) % n] == 0xFE)
+						{
+							bool other = false;
+							for (int o = 0; o < ns; o++) if (o != s && in_image[o] && hpos[o] == p) other = true;
+							if (!other) found = p;
+						}
+					}
+					if (found >= 0) { hpos[s] = found; break; }
+				}
+			}
 			else if (!(t->sectors[s].status & STX_SECT_RNF))
 			{
 				// the data mark is only searched behind an ID found in the image
