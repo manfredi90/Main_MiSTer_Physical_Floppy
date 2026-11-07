@@ -9,6 +9,7 @@
 #include "../../user_io.h"
 #include "../../fpga_io.h"
 #include "st_tos.h"
+#include "st_fdd.h"
 
 #define ST_WRITE_MEMORY 0x08
 #define ST_READ_MEMORY  0x09
@@ -443,6 +444,7 @@ void tos_poll()
 	static unsigned long timer = 0;
 
 	get_dmastate();
+	st_fdd_debug_poll();
 
 	// check the user button
 	if (!user_io_osd_is_visible() && (user_io_user_button() || user_io_get_kbd_reset()))

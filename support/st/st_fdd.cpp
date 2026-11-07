@@ -110,6 +110,96 @@ static void st_log(const char *fmt, ...)
 	pthread_mutex_unlock(&log_lock);
 }
 
+// FDC events the core queues for us (ST_GET_FDCDBG): commands, their end,
+// drive selection changes, status reads that clear a pending interrupt and
+// register writes. They go to stx.log while an STX image is mounted.
+#define ST_GET_FDCDBG 0x0d
+
+static const char *fdc_cmd_name(uint8_t c)
+{
+	if (!(c & 0x80))
+	{
+		switch (c >> 5) { case 0: return (c & 0x10) ? "seek" : "restore"; case 1: return "step";
+		                  case 2: return "step-in"; default: return "step-out"; }
+	}
+	switch (c >> 4)
+	{
+	case 0x8: case 0x9: return "read sector";
+	case 0xA: case 0xB: return "write sector";
+	case 0xC: return "read address";
+	case 0xD: return "force int";
+	case 0xE: return "read track";
+	default:  return "write track";
+	}
+}
+
+void st_fdd_debug_poll()
+{
+	if (!slots[0].stx && !slots[1].stx) return;
+
+	for (int n = 0; n < 32; n++)
+	{
+		uint16_t w[8];
+		EnableIO();
+		spi8(ST_GET_FDCDBG);
+		for (int i = 0; i < 8; i++) w[i] = spi_w(0);
+		DisableIO();
+
+		// the marker word tells where the entry starts
+		int o = ((w[0] & 0xFFFE) == 0xDB00) ? 0 : ((w[1] & 0xFFFE) == 0xDB00) ? 1 : -1;
+		if (o < 0 || !(w[o] & 1)) return;
+		const uint16_t *e = w + o + 1;
+		unsigned type = e[0] >> 8;
+		uint32_t us = ((uint32_t)(e[0] & 0xFF) << 24) | ((uint32_t)e[1] << 8) | (e[2] >> 8);
+		uint64_t pl = ((uint64_t)(e[2] & 0xFF) << 48) | ((uint64_t)e[3] << 32) | ((uint64_t)e[4] << 16) | e[5];
+		auto b = [&](int hi) { return (unsigned)((pl >> (hi - 7)) & 0xFF); };
+		char t[24];
+		snprintf(t, sizeof(t), "fdc %u.%03u", us / 1000, us % 1000);
+
+		switch (type)
+		{
+		case 1:
+			st_log("%s cmd %02X %s  trk %02X sec %02X data %02X  head %u%s%s%s%s", t, b(55), fdc_cmd_name(b(55)),
+				b(47), b(39), b(31), (unsigned)((pl >> 16) & 0x7F), (pl >> 23) & 1 ? " BUSY" : "",
+				(pl >> 15) & 1 ? " irq" : "", (pl >> 14) & 1 ? " drq" : "", (pl >> 13) & 1 ? "" : " motor-off");
+			break;
+		case 2:
+			st_log("%s end status %02X  trk %02X sec %02X  %u bytes  head %u%s", t, b(55), b(47), b(39),
+				(unsigned)((pl >> 16) & 0xFFFF), (unsigned)((pl >> 8) & 0x7F), (pl >> 15) & 1 ? " irq" : " NO-IRQ");
+			break;
+		case 3:
+		{
+			unsigned d = (pl >> 54) & 3;
+			st_log("%s select %s side %u%s%s%s%s%s  cmd %02X status %02X head %u pos %u", t,
+				d == 2 ? "A" : d == 1 ? "B" : d == 0 ? "A+B" : "none", (unsigned)((pl >> 53) & 1) ? 0u : 1u,
+				(pl >> 52) & 1 ? " present" : "", (pl >> 51) & 1 ? " mfmt" : "", (pl >> 50) & 1 ? " loaded" : "",
+				(pl >> 49) & 1 ? " busy" : "", (pl >> 48) & 1 ? " irq" : "",
+				b(47), b(39), (unsigned)((pl >> 24) & 0x7F), (unsigned)(pl & 0x1FFFF));
+			break;
+		}
+		case 4:
+			st_log("%s status read %02X clears irq (cmd %02X)", t, b(55), b(47));
+			break;
+		case 5:
+		{
+			static const char *rn[4] = { "cmd", "track", "sector", "data" };
+			st_log("%s write %s = %02X%s head %u", t, rn[(pl >> 48) & 3], b(47), (pl >> 39) & 1 ? " (busy)" : "",
+				(unsigned)((pl >> 32) & 0x7F));
+			break;
+		}
+		case 6:
+			st_log("%s image mounted (mask %u)", t, (unsigned)((pl >> 48) & 3));
+			break;
+		case 15:
+			st_log("%s %u events lost", t, (unsigned)(pl & 0xFFFF));
+			break;
+		default:
+			st_log("%s event %u %014llx", t, type, (unsigned long long)pl);
+			break;
+		}
+	}
+}
+
 static bool has_ext(const char *name, const char *ext)
 {
 	size_t n = strlen(name), e = strlen(ext);

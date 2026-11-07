@@ -21,4 +21,7 @@ uint64_t st_fdd_size(int index, uint64_t size);
 // sd request service: 0 = not ours, 1 = handled, -1 = stop
 int  st_fdd_sd_service(int disk, int op, uint64_t lba, int sz, int ack);
 
+// Drains the FDC debug events of the core into stx.log (STX mounted only)
+void st_fdd_debug_poll();
+
 #endif
