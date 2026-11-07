@@ -102,6 +102,8 @@ struct StxBuildReport
 	int jumps = 0;                    // phase jumps found inside the track
 	int forced_cells = 0;             // cells set so that out-of-phase sectors read as recorded
 	bool unformatted = false;
+	bool used_image = false;          // layout taken from the track image
+	int bad_fields = 0;               // readable IDs / sound sectors that do not read right
 };
 
 // Rebuild cylinder/head of an STX image into tb. Returns false if the track

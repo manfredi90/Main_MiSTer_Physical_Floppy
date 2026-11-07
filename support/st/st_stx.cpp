@@ -252,7 +252,14 @@ static double sector_byte_ns(const StxSector &sec, int i)
 		// 1 unit = 32 FDC cycles at 8 MHz, plus 28 cycles per block of 16 bytes
 		return (tv * 32.0 + 28.0) * 125.0 / 16.0;
 	}
-	if (sec.read_time) return sec.read_time * 1000.0 / sec.size;
+	// a read time far from the standard rate is not a speed the drive could
+	// have read at (Dragon's Lair: 1024 byte sectors listed with twice their
+	// time): standard timing then
+	if (sec.read_time)
+	{
+		double b = sec.read_time * 1000.0 / sec.size;
+		if (b > NOMINAL_BYTE_NS * 0.85 && b < NOMINAL_BYTE_NS * 1.15) return b;
+	}
 	return 0;
 }
 
@@ -622,10 +629,48 @@ static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std
 	if (rep) rep->forced_cells = forced;
 }
 
-bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, StxBuildReport *rep)
+// Fields that should read right but do not: IDs listed as readable, and the
+// data with its CRC of sectors without an intentional CRC error or fuzzy bits.
+static int bad_fields(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, const TrackBuilder &tb)
 {
-	StxBuildReport dummy;
-	if (!rep) rep = &dummy;
+	TrackBuilder::Cells cs;
+	tb.build_cells(cs);
+	int total = (int)cs.bit.size();
+	if (!total) return 0;
+	auto byte_at = [&](int c0, int i) {
+		uint8_t v = 0;
+		for (int k = 0; k < 8; k++) v = (uint8_t)((v << 1) | cs.bit[(c0 + 16 * i + 2 * k + 1) % total]);
+		return v;
+	};
+	int bad = 0;
+	for (int s = 0; s < (int)t.sectors.size(); s++)
+	{
+		const StxSector &sec = t.sectors[s];
+		if (!(sec.status & STX_SECT_RNF))
+		{
+			int c0 = cs.byte_cell[tb.wrap(hpos[s] + 4)];
+			for (int i = 0; i < 4; i++) if (byte_at(c0, i) != sec.id[i]) { bad++; break; }
+		}
+		if (!sec.data || dpos[s] < 0 || (sec.status & STX_SECT_CRC_ERROR) || sec.fuzzy) continue;
+		int c0 = cs.byte_cell[tb.wrap(dpos[s] + 4)];
+		uint16_t crc = 0xFFFF;
+		for (int i = 0; i < 3; i++) crc = st_crc16(crc, 0xA1);
+		crc = st_crc16(crc, (sec.status & STX_SECT_DELETED) ? 0xF8 : 0xFB);
+		bool ok = true;
+		for (int i = 0; i < sec.size && ok; i++)
+		{
+			uint8_t v = byte_at(c0, i);
+			if (v != sec.data[i]) ok = false;
+			crc = st_crc16(crc, v);
+		}
+		if (ok && ((byte_at(c0, sec.size) << 8) | byte_at(c0, sec.size + 1)) != crc) ok = false;
+		if (!ok) bad++;
+	}
+	return bad;
+}
+
+static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, StxBuildReport *rep, bool allow_image)
+{
 	*rep = StxBuildReport();
 
 	const StxTrack *t = img.find(cyl, head);
@@ -661,7 +706,7 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 	// which fewer than half of the ID fields can be found is not usable
 	// (it was read out of sync, or made by a tool that did): the track is
 	// then rebuilt from the sector list alone.
-	bool use_image = t->image != nullptr;
+	bool use_image = allow_image && t->image != nullptr;
 	std::vector<bool> in_image(ns, false);
 	int delta = 0;
 	if (use_image)
@@ -739,8 +784,32 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 		}
 	}
 
+	// Data marks not found in an image go at the standard distance from the
+	// ID, but a sound sector cannot run into the next ID: on tightly packed
+	// tracks (Dragon's Lair, 11 sectors) gap 2 is shorter, so the data mark
+	// moves closer to its ID, not before the end of the ID field.
 	for (int s = 0; s < ns; s++)
-		if (!(t->sectors[s].status & STX_SECT_RNF) && dpos[s] < 0) dpos[s] = tb.wrap(hpos[s] + 44);
+	{
+		const StxSector &sec = t->sectors[s];
+		if ((sec.status & STX_SECT_RNF) || dpos[s] >= 0) continue;
+		int off = 44;
+		if (sec.data && !(sec.status & STX_SECT_CRC_ERROR) && !sec.fuzzy)
+		{
+			int next = n;
+			for (int o = 0; o < ns; o++)
+			{
+				if (o == s) continue;
+				int d = tb.wrap(hpos[o] - hpos[s]);
+				// an ID the data itself carries is nested on purpose, not in the way
+				int r = d - off - 4;
+				if (r >= 0 && r + 8 <= sec.size && sec.data[r + 3] == 0xFE && !memcmp(sec.data + r + 4, t->sectors[o].id, 4)) continue;
+				if (d > 0 && d < next) next = d;
+			}
+			int need = off + 4 + sec.size + 2 + 2;
+			if (need > next) off = std::max(10 + 2, next - (4 + sec.size + 2 + 2));
+		}
+		dpos[s] = tb.wrap(hpos[s] + off);
+	}
 
 	// pass 0: standard preambles (only over gap bytes)
 	if (!use_image)
@@ -854,5 +923,31 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 	fit_splice(*t, dpos, tb, rep);
 	fit_jumps(*t, hpos, dpos, tb, rep);
 	fit_cells(*t, hpos, dpos, tb, rep);
+	rep->used_image = use_image;
+	rep->bad_fields = bad_fields(*t, hpos, dpos, tb);
 	return true;
+}
+
+bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, StxBuildReport *rep)
+{
+	StxBuildReport dummy;
+	if (!rep) rep = &dummy;
+	bool ok = build_track(img, cyl, head, tb, rep, true);
+	// A track image can mislead the layout (a false ID or data mark found in
+	// it, an ID missing from it placed by time next to image positions): if
+	// a sound field then reads wrong, rebuild from the sector list alone and
+	// keep whichever reads better.
+	if (ok && rep->used_image && rep->bad_fields)
+	{
+		TrackBuilder tb2;
+		StxBuildReport r2;
+		build_track(img, cyl, head, tb2, &r2, false);
+		if (r2.bad_fields < rep->bad_fields)
+		{
+			tb = tb2;
+			*rep = r2;
+			rep->image_ignored = true;
+		}
+	}
+	return ok;
 }
