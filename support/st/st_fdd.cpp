@@ -17,7 +17,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <stdarg.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "../../hardware.h"
@@ -47,6 +52,64 @@ struct StFddSlot
 
 static StFddSlot slots[ST_FDD_SLOTS];
 
+// Log on the SD card, /media/fat/logs/stx.log (the previous session is kept
+// as stx_prev.log): the lines are buffered and written once a second by a
+// thread, so the core never waits for the card and the last lines before
+// a game stops are there too.
+#define ST_LOG_DIR   "/media/fat/logs"
+#define ST_LOG_PATH  ST_LOG_DIR "/stx.log"
+#define ST_LOG_PREV  ST_LOG_DIR "/stx_prev.log"
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::string log_buf;
+static bool log_started = false;
+
+static void *log_thread(void *)
+{
+	for (;;)
+	{
+		sleep(1);
+		pthread_mutex_lock(&log_lock);
+		std::string b;
+		b.swap(log_buf);
+		pthread_mutex_unlock(&log_lock);
+		if (b.empty()) continue;
+		FILE *f = fopen(ST_LOG_PATH, "a");
+		if (f)
+		{
+			fwrite(b.data(), 1, b.size(), f);
+			fclose(f);
+		}
+	}
+	return nullptr;
+}
+
+static void st_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void st_log(const char *fmt, ...)
+{
+	char line[512];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	printf("STX: %s\n", line);
+
+	pthread_mutex_lock(&log_lock);
+	if (!log_started)
+	{
+		log_started = true;
+		mkdir(ST_LOG_DIR, 0755);
+		rename(ST_LOG_PATH, ST_LOG_PREV);
+		pthread_t th;
+		if (!pthread_create(&th, nullptr, log_thread, nullptr)) pthread_detach(th);
+	}
+	char ts[32];
+	snprintf(ts, sizeof(ts), "%10lu ", GetTimer(0));
+	log_buf += ts;
+	log_buf += line;
+	log_buf += '\n';
+	pthread_mutex_unlock(&log_lock);
+}
+
 static bool has_ext(const char *name, const char *ext)
 {
 	size_t n = strlen(name), e = strlen(ext);
@@ -56,6 +119,7 @@ static bool has_ext(const char *name, const char *ext)
 void st_fdd_unmount(int index)
 {
 	if (index < 0 || index >= ST_FDD_SLOTS) return;
+	if (slots[index].stx) st_log("drive %c: ejected", 'A' + index);
 	delete slots[index].stx;
 	slots[index].stx = nullptr;
 	slots[index].tracks.clear();
@@ -69,7 +133,7 @@ int st_fdd_mount_hook(int index, const char *name, fileTYPE *f, int *writable)
 
 	if (f->size <= 0 || f->size > ST_FDD_MAX_FILE)
 	{
-		printf("STX: %s: bad size %lld\n", name, (long long)f->size);
+		st_log("%s: bad size %lld", name, (long long)f->size);
 		return 0;
 	}
 
@@ -91,14 +155,14 @@ int st_fdd_mount_hook(int index, const char *name, fileTYPE *f, int *writable)
 	free(buf);
 	if (!ok)
 	{
-		printf("STX: %s: %s\n", name, got == n ? img->error() : "read error");
+		st_log("%s: %s", name, got == n ? img->error() : "read error");
 		delete img;
 		return 0;
 	}
 
 	slots[index].stx = img;
 	*writable = 0;   // writing to STX images is not supported yet
-	printf("STX: slot %d: %s, %d cylinders, %d heads, revision %d\n", index, name, img->cylinders(), img->heads(), img->revision());
+	st_log("drive %c: %s, %d cylinders, %d heads, revision %d (Main built " __DATE__ " " __TIME__ ")", 'A' + index, name, img->cylinders(), img->heads(), img->revision());
 	return 1;
 }
 
@@ -121,7 +185,7 @@ static const StFddTrack &build(StFddSlot &s, int cyl, int head)
 	stx_build_track(*s.stx, cyl, head, tb, &rep);
 	tb.encode((uint8_t)cyl, (uint8_t)head, t.meta.data(), t.cells.data());
 	if (rep.jumps || rep.splice_cells)
-		printf("STX: track %d.%d rebuilt with %d phase jump(s), splice +%d cells\n", cyl, head, rep.jumps, rep.splice_cells);
+		st_log("track %d.%d rebuilt with %d phase jump(s), splice +%d cells", cyl, head, rep.jumps, rep.splice_cells);
 	return t;
 }
 
@@ -135,7 +199,7 @@ int st_fdd_sd_service(int disk, int op, uint64_t lba, int sz, int ack)
 
 	if (op == 2)
 	{
-		printf("STX: drive %c write to lba %llx dropped\n", 'A' + disk, (unsigned long long)lba);
+		st_log("drive %c: write to lba %llx dropped", 'A' + disk, (unsigned long long)lba);
 		// writes are accepted and dropped (read-only image)
 		EnableIO();
 		spi_w(UIO_SECTOR_WR | ack);
@@ -156,11 +220,11 @@ int st_fdd_sd_service(int disk, int op, uint64_t lba, int sz, int ack)
 		bool cached = s.tracks.count(cyl * 2 + head) != 0;
 		const StFddTrack &t = build(s, cyl, head);
 		if (part == ST_MFMT_PART_META)
-			printf("STX: drive %c track %d.%d %s (%lu ms)\n", 'A' + disk, cyl, head, cached ? "cached" : "built", GetTimer(0) - t0);
+			st_log("drive %c: track %d.%d %s (%lu ms)", 'A' + disk, cyl, head, cached ? "cached" : "built", GetTimer(0) - t0);
 		if (part == ST_MFMT_PART_META) memcpy(buf, t.meta.data(), sz < ST_MFMT_META_BYTES ? sz : ST_MFMT_META_BYTES);
 		else if (part == ST_MFMT_PART_CELLS) memcpy(buf, t.cells.data(), sz);
 	}
-	else printf("STX: drive %c sector request lba %llu (not a track)\n", 'A' + disk, (unsigned long long)lba);
+	else st_log("drive %c: sector request lba %llu (not a track)", 'A' + disk, (unsigned long long)lba);
 	// a sector request on a track image means an old core: it gets empty sectors
 
 	EnableIO();
