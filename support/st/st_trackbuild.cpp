@@ -226,7 +226,11 @@ void TrackBuilder::build_cells(Cells &out) const
 	}
 
 	for (auto &f : m_cell_set)
-		if (f.first >= 0 && f.first < (int)out.bit.size()) out.bit[f.first] = f.second;
+		if (f.first >= 0 && f.first < (int)out.bit.size())
+		{
+			if (f.second == 2) out.weak[f.first] = 1;
+			else out.bit[f.first] = f.second;
+		}
 }
 
 bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cells) const

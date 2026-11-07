@@ -78,6 +78,8 @@ public:
 	// where its data cells are another field's clock cells: no flux where
 	// both read 00, as on Turrican tracks 7-10.
 	void set_cell(int cell, int bit) { m_cell_set.emplace_back(cell, (uint8_t)(bit & 1)); }
+	// a cell that reads randomly (fuzzy bit of a field read out of phase)
+	void set_weak_cell(int cell) { m_cell_set.emplace_back(cell, (uint8_t)2); }
 	void clear_cells() { m_cell_set.clear(); }
 	int forced_cells() const { return (int)m_cell_set.size(); }
 
