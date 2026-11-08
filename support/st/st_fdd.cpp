@@ -144,11 +144,17 @@ static const char *fdc_cmd_name(uint8_t c)
 
 void st_fdd_debug_poll()
 {
-	// once an STX was mounted keep draining, also while the player swaps
-	// disks (nothing is mounted for a moment)
+	// Off unless /media/fat/logs/stx_fdc_debug exists (and the core is built
+	// with DEBUG_EVENTS). Once an STX was mounted keep draining, also while
+	// the player swaps disks (nothing is mounted for a moment).
+	static int enabled = -1;
 	static bool seen = false;
-	if (slots[0].stx || slots[1].stx) seen = true;
-	if (!seen) return;
+	if (slots[0].stx || slots[1].stx)
+	{
+		if (enabled < 0) enabled = access(ST_LOG_DIR "/stx_fdc_debug", F_OK) == 0;
+		seen = true;
+	}
+	if (!seen || enabled <= 0) return;
 
 	for (int n = 0; n < 512; n++)
 	{
