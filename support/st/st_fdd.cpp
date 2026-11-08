@@ -52,6 +52,7 @@ struct StFddSlot
 };
 
 static StFddSlot slots[ST_FDD_SLOTS];
+static bool flux_seen = false;   // an SCP or IPF was mounted (the core reads it by itself)
 
 // Log on the SD card, /media/fat/logs/stx.log (the previous session is kept
 // as stx_prev.log): the lines are buffered and written once a second by a
@@ -146,11 +147,11 @@ static const char *fdc_cmd_name(uint8_t c)
 void st_fdd_debug_poll()
 {
 	// Off unless /media/fat/logs/stx_fdc_debug exists (and the core is built
-	// with DEBUG_EVENTS). Once an STX was mounted keep draining, also while
-	// the player swaps disks (nothing is mounted for a moment).
+	// with DEBUG_EVENTS). Once an STX, SCP or IPF was mounted keep draining,
+	// also while the player swaps disks (nothing is mounted for a moment).
 	static int enabled = -1;
 	static bool seen = false;
-	if (slots[0].stx || slots[1].stx)
+	if (slots[0].stx || slots[1].stx || flux_seen)
 	{
 		if (enabled < 0) enabled = access(ST_LOG_DIR "/stx_fdc_debug", F_OK) == 0;
 		seen = true;
@@ -258,7 +259,15 @@ int st_fdd_mount_hook(int index, const char *name, fileTYPE *f, int *writable)
 			return 0;
 		}
 		*writable = 0;
+		flux_seen = true;
 		st_log("drive %c: %s as SCP (%lld bytes)", 'A' + index, name, (long long)f->size);
+		return 1;
+	}
+
+	if (has_ext(name, "scp"))
+	{
+		flux_seen = true;
+		st_log("drive %c: %s (%lld bytes)", 'A' + index, name, (long long)f->size);
 		return 1;
 	}
 
