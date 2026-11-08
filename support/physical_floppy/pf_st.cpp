@@ -45,6 +45,7 @@ int pfloppy_st_slot(void)
 
 uint64_t pfloppy_st_mount(int index, const char *path)
 {
+	if (pfloppy_st_flux_slot() >= 0) pfloppy_st_flux_unmount(pfloppy_st_flux_slot());  // the flux mode had the drive
 	if (st_slot >= 0 && st_slot != index) pfloppy_st_unmount(st_slot);
 	snprintf(st_path, sizeof(st_path), "%s", path);
 

@@ -139,4 +139,18 @@ void pfloppy_st_unmount(int index);
 int pfloppy_st_sd_service(int disk, int op, uint32_t lba, int sz, int ack);
 void pfloppy_st_poll(void);
 
+/*
+ * Atari ST core, flux mode (pf_st_flux.cpp): the drive given to the core as
+ * an SCP flux image, tracks read when the ST asks for them. Any ST disk,
+ * copy-protected ones included; needs the core that reads SCP images.
+ * Read-only. Selected by inserting PFLOPPY_ST_FLUX_PLACEHOLDER in A: or B:.
+ */
+#define PFLOPPY_ST_FLUX_PLACEHOLDER "_GREASEWEAZLE_.scp"
+int pfloppy_is_st_flux_placeholder(const char *path);
+int pfloppy_st_flux_slot(void);                 // the slot with the drive, -1 none
+uint64_t pfloppy_st_flux_mount(int index, const char *path);
+void pfloppy_st_flux_unmount(int index);
+int pfloppy_st_flux_sd_service(int disk, int op, uint32_t lba, int sz, int ack);
+void pfloppy_st_flux_poll(void);
+
 #endif
