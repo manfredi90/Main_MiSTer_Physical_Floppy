@@ -1,0 +1,60 @@
+name: Build Main (st-stx)
+
+# Builds the MiSTer binary with the toolchain the MiSTer project uses
+# (ARM GNU 10.2-2020.11, arm-none-linux-gnueabihf) on every push to st-stx,
+# then stores it on the build-output-st-stx branch, so it can be fetched with
+# plain git. Copy the binary to /media/fat/MiSTer on the SD card.
+on:
+  push:
+    branches: [ "st-stx" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the ARM toolchain
+        run: |
+          TC=gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf
+          curl -sSL -o /tmp/tc.tar.xz "https://developer.arm.com/-/media/Files/downloads/gnu-a/10.2-2020.11/binrel/${TC}.tar.xz"
+          sudo tar -C /opt -xf /tmp/tc.tar.xz
+          echo "/opt/${TC}/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          arm-none-linux-gnueabihf-gcc --version | head -1
+          make -j"$(nproc)"
+          ls -l bin/MiSTer
+
+      - name: Host test of the STX converter
+        run: |
+          cd support/st/test
+          make test
+
+      - name: Collect output
+        run: |
+          mkdir -p out
+          cp bin/MiSTer out/MiSTer
+          echo "${GITHUB_SHA}" > out/COMMIT
+          sha256sum out/MiSTer > out/MiSTer.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MiSTer-st-stx
+          path: out
+
+      - name: Push to build-output-st-stx branch
+        run: |
+          cd out
+          git init -q
+          git checkout -q -b build-output-st-stx
+          git add -A
+          git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" \
+            commit -q -m "MiSTer binary built from ${GITHUB_SHA::7} (run ${GITHUB_RUN_ID})"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" build-output-st-stx

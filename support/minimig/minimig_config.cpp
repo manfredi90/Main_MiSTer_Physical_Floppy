@@ -294,6 +294,26 @@ static char UploadKickstart(char *name)
 static char UploadActionReplay()
 {
 	fileTYPE file = {};
+	if (minimig_get_extcfg() & MINIMIG_EXTCFG_AR)
+	{
+		// the Action Replay: AR5's DeMoN v2 build, its ROM ($A80000) and RAM
+		// ($AC0000) image, 512 KB at most; it takes no configuration
+		if (FileOpen(&file, user_io_make_filepath(HomeDir(), "AR5.ROM")) || FileOpen(&file, "AR5.ROM"))
+		{
+			if (file.size > 0x80000)
+			{
+				printf("\nAR5.ROM is larger than 512 KB!\n");
+				FileClose(&file);
+				return(0);
+			}
+			puts("Uploading Action Replay ROM... ");
+			SendFileV2(&file, NULL, 0, 0xa80000, (file.size + 511) >> 9);
+			FileClose(&file);
+			return(1);
+		}
+		puts("\nAR5.ROM not found!\n");
+		return(0);
+	}
 	if(FileOpen(&file, user_io_make_filepath(HomeDir(), "HRTMON.ROM")) || FileOpen(&file, "HRTMON.ROM"))
 	{
 		int adr, data;
@@ -470,6 +490,8 @@ static void ApplyConfiguration(char reloadkickstart)
 	minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
 	minimig_ConfigFloppyExt(minimig_config.externalfloppy.exDrives[0], minimig_config.externalfloppy.exDrives[1], minimig_config.externalfloppy.exDrives[2], minimig_config.externalfloppy.exDrives[3]);
 
+	// the cartridge's type before its image goes up, while the CPU is halted
+	minimig_set_extcfg(minimig_get_extcfg() & ~1);
 	if (minimig_config.memory & 0x40) UploadActionReplay();
 
 	if (reloadkickstart)
@@ -896,8 +918,12 @@ void minimig_ConfigFloppyExt(unsigned char drive0, unsigned char drive1, unsigne
 }
 
 void minimig_ConfigUserPort(mm_userportMode mode) {
-	printf("User Port: %s\n", mode == mm_userportMode::mmup_mp32pi ? "MT32pi":"MiSTer Floppy");
-	spi_uio_cmd8(UIO_MM2_USRPORT, mode == mm_userportMode::mmup_mp32pi ? 0 : 1);
+	static const char *names[] = { "MT32pi", "MiSTer Floppy", "SNAC joystick 1", "SNAC joystick 2" };
+	printf("User Port: %s\n", names[mode & 3]);
+	if (mode == mm_userportMode::mmup_snac1 || mode == mm_userportMode::mmup_snac2)
+		spi_uio_cmd8(UIO_MM2_USRPORT, ((mode - 1) << 1) | ((minimig_config.snac_autofire % 3) << 3));
+	else
+		spi_uio_cmd8(UIO_MM2_USRPORT, mode == mm_userportMode::mmup_mp32pi ? 0 : 1);
 }
 
 void minimig_ConfigAutofire(unsigned char autofire, unsigned char mask)

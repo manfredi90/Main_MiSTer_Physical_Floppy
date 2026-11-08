@@ -1858,6 +1858,7 @@ static int joyswap = 0;
 void user_io_set_joyswap(int swap)
 {
 	joyswap = swap;
+	input_analog_triggers_resync(osd_is_visible);
 }
 
 int user_io_get_joyswap()
@@ -1895,6 +1896,21 @@ void user_io_r_analog_joystick(unsigned char joystick, char valueX, char valueY)
 			spi8(valueX);
 			spi8(valueY);
 		}
+		DisableIO();
+	}
+}
+
+void user_io_analog_triggers(unsigned char joystick, uint8_t l2, uint8_t r2)
+{
+	static uint8_t sent[NUMPLAYERS][2] = {};
+	uint8_t joy = (joystick > 1 || !joyswap) ? joystick : joystick ^ 1;
+
+	if (core_type == CORE_TYPE_8BIT && joy < NUMPLAYERS && (sent[joy][0] != l2 || sent[joy][1] != r2))
+	{
+		sent[joy][0] = l2;
+		sent[joy][1] = r2;
+		spi_uio_cmd8_cont(UIO_ATRIG, joy);
+		spi_w((r2 << 8) | l2);
 		DisableIO();
 	}
 }
@@ -2220,6 +2236,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 
 	sd_image_cangrow[index] = (pre != 0);
 	sd_type[index] = SD_TYPE_DEFAULT ;
+	st_fdd_unmount(index);
 	if (len && pfloppy_mac_core() && pfloppy_is_mac_placeholder(name))
 	{
 		// MacPlus floppy slot: the Greaseweazle drive (support/physical_floppy/pf_mac.cpp)
@@ -2339,6 +2356,9 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 				// Falcon SCSI slots: image registration, CD cue/bin translation (support/falcon)
 				if (ret) ret = falcon_scsi_mount_hook(index, name, &sd_image[index], &writable);
 
+				// Atari ST: STX images are served as MFMT tracks (support/st)
+				if (ret) ret = st_fdd_mount_hook(index, name, &sd_image[index], &writable);
+
 				if (ret && is_c128())
 				{
 					printf("Disk image type: %d\n", img_type);
@@ -2365,6 +2385,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 		next_unmount(index);
 		a3_unmount(index);
 		falcon_scsi_unmount(index);
+		st_fdd_unmount(index);
 	}
 
 	buffer_lba[index] = -1;
@@ -2409,6 +2430,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	spi8(UIO_SET_SDINFO);
 
 	__off64_t size = pc88_size(index, sd_image[index].size);
+	if (ret) size = (__off64_t)st_fdd_size(index, (uint64_t)size);
 	if (!ret && pre)
 	{
 		sd_image[index].type = 2;
@@ -3560,7 +3582,7 @@ void user_io_poll()
 			else if ( sd_type[disk] == SD_TYPE_IIGS)
 			{
 				if (op == 2) iigs_write(disk, &sd_image[disk], lba, ack);
-				else if (op & 1) iigs_read(disk, &sd_image[disk], lba, ack);
+				else if (op & 1) iigs_read(disk, &sd_image[disk], lba, blks, ack);
 				else break;
 			}
 			else if (int macop = mac_sd_service(disk, &sd_image[disk], op, lba, sz, ack))
@@ -3600,6 +3622,11 @@ void user_io_poll()
 			else if (int pc88op = pc88_sd_service(disk, &sd_image[disk], op, lba, sz, ack))
 			{
 				if (pc88op < 0) break;
+			}
+			else if (int stop = st_fdd_sd_service(disk, op, lba, sz, ack))
+			{
+				// Atari ST MFMT track requests (support/st); SPI is done by the hook.
+				if (stop < 0) break;
 			}
 			else if (int falop = falcon_sd_service(disk, op, lba, sz, ack))
 			{
@@ -4473,8 +4500,11 @@ void user_io_check_reset(unsigned short modifiers, char useKeys)
 
 void user_io_osd_key_enable(char on)
 {
+	on = !!on;
 	//printf("OSD is now %s\n", on ? "visible" : "invisible");
+	if (osd_is_visible != on) input_analog_triggers_resync(on);
 	osd_is_visible = on;
+
 	if (cfg.log_file_entry) MakeFile("/tmp/OSD_VISIBLE", on ? "1" : "0");
 	input_switch(-1);
 }

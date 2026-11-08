@@ -92,10 +92,6 @@ uint16_t ide_check()
 	return res;
 }
 
-// Per-channel buffer for ATA PIO reads. A read prefetches its next block
-// while the guest consumes the current one, and the transfer now returns to
-// the main loop between blocks, so the shared ide_buf could be overwritten
-// meanwhile by the other channel (e.g. an ATAPI command on the secondary).
 static uint8_t ide_rd_buf[2][ide_io_max_size * 512];
 
 static inline uint8_t *ide_xfer_buf(ide_config *ide)
@@ -110,25 +106,13 @@ static uint64_t ide_time_us()
 	return (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
 }
 
-// Wait briefly for the core to take or supply the next block of a transfer.
-//
-// This must never block: the main loop has to keep running between blocks.
-// Main is single threaded and serves both IDE channels, the OSD and the
-// network. An unbounded wait here deadlocks whenever the guest touches the
-// other channel mid-transfer (Win9x polling the ATAPI CD on the secondary
-// while a multi-block transfer on the primary waits for IRQ14 to be served):
-// the guest waits for the other channel, Main waits for this one, and the
-// whole MiSTer (OSD included) hangs until the guest driver times out.
-//
-// So give up as soon as the other channel has a request, or after a short
-// time, and return 0; the transfer then resumes from ide_io() on the next
-// data request. The short spin keeps the block-to-block latency of the
-// common case as low as before.
-//
-// The Amiga can be held in the A2065 interrupt server meanwhile: it
-// acknowledges CSR0 and loops until the bits clear, which needs a2065_poll()
-// to apply the write. a2065_poll() costs an uncached DDR3 read and a recv()
-// each call, so it runs on every 16th miss only.
+// Wait for the core to take or supply the next block of a transfer. The
+// Amiga can be held in the A2065 interrupt server meanwhile: it acknowledges
+// CSR0 and loops until the bits clear, which needs a2065_poll() to apply the
+// write. Without it here neither side ever proceeds.
+// a2065_poll() costs an uncached DDR3 read and a recv() each call, so it runs
+// on every 16th miss only: the core usually answers within a few checks, and
+// the handshake latency of every block would otherwise pay for it.
 #define IDE_WAIT_REQ_US 1000
 
 static uint16_t ide_wait_req(ide_config *ide)
@@ -831,8 +815,6 @@ inline int readhdd(drive_t *drive, uint32_t lba, int cnt, uint8_t *buf)
 	}
 }
 
-// ATA PIO read: hand the prefetched block to the core and prefetch the next.
-// Returns 1 if more blocks follow (state IDE_STATE_WAIT_RD), 0 when done.
 static int read_send_block(ide_config *ide)
 {
 	uint8_t *buf = ide_xfer_buf(ide);
@@ -875,12 +857,6 @@ static int read_send_block(ide_config *ide)
 	return 1;
 }
 
-// Time one ide_io() call may spend on a transfer before it goes back to the
-// main loop, even if the core already asks for the next block. Writes go to
-// the image with O_SYNC, ~6 ms per block on an SD card, and Win9x writes one
-// sector per block: without a limit a long write held Main for ~0.5 s at a
-// time, the mouse stuttered and the OSD lagged. A pending request stays
-// asserted by the core, so the next main loop pass resumes the transfer.
 #define IDE_XFER_BUDGET_US 4000
 
 static inline bool ide_xfer_budget_left(uint64_t start)
@@ -888,9 +864,6 @@ static inline bool ide_xfer_budget_left(uint64_t start)
 	return (ide_time_us() - start) < IDE_XFER_BUDGET_US;
 }
 
-// Send blocks for as long as the core keeps asking for them right away and
-// the time budget lasts; otherwise leave the transfer pending and let
-// ide_io() resume it.
 static void read_continue(ide_config *ide)
 {
 	uint64_t start = ide_time_us();
@@ -916,7 +889,6 @@ static void process_read(ide_config *ide, int multi)
 	read_continue(ide);
 }
 
-// ATA PIO write: ask the core for the next block.
 static void write_request_block(ide_config *ide)
 {
 	uint32_t cnt = ide->xfer_multi ? get_cnt(ide) : 1;
@@ -930,8 +902,6 @@ static void write_request_block(ide_config *ide)
 	ide->state = IDE_STATE_WAIT_WR;
 }
 
-// ATA PIO write: take the block the core has collected.
-// Returns 1 if more blocks follow (state IDE_STATE_WAIT_WR), 0 when done.
 static int write_recv_block(ide_config *ide)
 {
 	uint32_t cnt = ide->xfer_cnt;
@@ -970,8 +940,6 @@ static int write_recv_block(ide_config *ide)
 	return 1;
 }
 
-// Take blocks for as long as the core supplies them right away and the time
-// budget lasts; otherwise leave the transfer pending and let ide_io() resume it.
 static void write_continue(ide_config *ide, uint64_t start)
 {
 	while (ide_xfer_budget_left(start) && ide_wait_req(ide) == 5 && write_recv_block(ide)) {}
