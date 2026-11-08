@@ -1024,6 +1024,40 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		}
 	}
 
+	// An image that could not be used for the layout (its ID fields read out
+	// of phase, as on track 41 of many Pasti dumps) still shows what gap 1
+	// holds. Some protections keep a signature there and check it with read
+	// track (Union Demo: "tex" on track 41): those bytes are taken from the
+	// image, up to the preamble of the first ID field, and the fields are
+	// moved (all together) to where the image shows them, which is where
+	// they are on the disk. Runs of 4E read out of phase go back to 4E.
+	if (!use_image && allow_image && t->image && ns)
+	{
+		const uint8_t *im = t->image;
+		int img_first = -1;
+		for (int i = 1; i + 2 < t->image_size; i++)
+			if (im[i] == 0xA1 && im[i + 1] == 0xA1 && im[i + 2] >= 0xF8) { img_first = i - 1; break; }
+		int trk_first = n;
+		for (int s = 0; s < ns; s++) if (hpos[s] < trk_first) trk_first = hpos[s];
+		int len = img_first - 12;
+		if (img_first > 0 && abs(img_first - trk_first) <= 16 && len > 0)
+		{
+			for (int s = 0; s < ns; s++) hpos[s] = tb.wrap(hpos[s] + img_first - trk_first);
+			static const uint8_t rot4e[] = { 0x4e, 0x21, 0x9c, 0x42, 0x39, 0x84, 0x72, 0x09,
+			                                 0xe4, 0x12, 0xc9, 0x24, 0x93, 0x48, 0x27, 0x90 };
+			for (int i = 0; i < len;)
+			{
+				int j = i + 1;
+				while (j < len && im[j] == im[i]) j++;
+				uint8_t v = im[i];
+				if (j - i >= 4) for (uint8_t x : rot4e) if (v == x) v = 0x4E;
+				for (int k = i; k < j; k++) tb.put(k, v, 0);
+				i = j;
+			}
+			rep->gap1_from_image = len;
+		}
+	}
+
 	// Data marks not found in an image go at the standard distance from the
 	// ID, but a sound sector cannot run into the next ID: on tightly packed
 	// tracks (Dragon's Lair, 11 sectors) gap 2 is shorter, so the data mark
