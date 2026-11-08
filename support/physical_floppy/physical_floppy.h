@@ -127,13 +127,15 @@ void pfloppy_mac_poll(void);
  * .st images (the sectors in order) one sector at a time: the disk is given
  * as one, sectors read from the drive when the ST asks for them. MFM disks
  * of 9 to 11 sectors per track (and 18 on HD disks), up to 83 cylinders.
- * Read-only for now (the ST sees the disk write-protected). Copy-protected
+ * Writable (written to the disk in the background, as on the PC cores) unless
+ * the write-protect tab of the floppy is set. Copy-protected
  * disks don't work: the core takes sector images only.
  */
 #define PFLOPPY_ST_PLACEHOLDER "_GREASEWEAZLE_.st"
 
 int pfloppy_is_st_placeholder(const char *path);
 int pfloppy_st_slot(void);                      // the slot with the drive, -1 none
+int pfloppy_st_write_protected(void);           // the disk in it is write-protected (or there is none)
 uint64_t pfloppy_st_mount(int index, const char *path);
 void pfloppy_st_unmount(int index);
 int pfloppy_st_sd_service(int disk, int op, uint32_t lba, int sz, int ack);

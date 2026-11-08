@@ -2267,7 +2267,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 		sd_image[index].offset = 0;
 		sd_image[index].size = pfloppy_st_mount(index, name);
 		ret = sd_image[index].size ? 1 : 0;
-		writable = 0;
+		writable = ret && !pfloppy_st_write_protected();
 		if (!ret) printf("No disk in the Greaseweazle drive\n");
 	}
 	else if (len)

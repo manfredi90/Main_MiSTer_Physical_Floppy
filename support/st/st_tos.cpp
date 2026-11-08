@@ -535,10 +535,11 @@ void tos_insert_disk(int index, const char *name)
 	{
 		user_io_file_mount(name, index);
 		uint32_t wpbit = index ? TOS_CONTROL_FDC_WR_PROT_B : TOS_CONTROL_FDC_WR_PROT_A;
-		if (tos_disk_is_inserted(index) && (pfloppy_st_slot() == index || pfloppy_st_flux_slot() == index))
+		if (tos_disk_is_inserted(index) && ((pfloppy_st_slot() == index && pfloppy_st_write_protected()) || pfloppy_st_flux_slot() == index))
 		{
-			// the Greaseweazle drive (support/physical_floppy/pf_st.cpp) is
-			// read-only for now: the disk is always write-protected
+			// the Greaseweazle drive: a disk with its write-protect tab set
+			// (pf_st.cpp), or any disk in flux mode (pf_st_flux.cpp, the core
+			// cannot write to an SCP image), is write-protected
 			if (config.system_ctrl & wpbit) wpins &= ~wpbit;
 			else wpins |= wpbit;
 		}
