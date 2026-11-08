@@ -30,6 +30,7 @@
 #include "../../spi.h"
 #include "../../file_io.h"
 #include "st_fdd.h"
+#include "st_ipf.h"
 #include "st_mfmt.h"
 #include "st_stx.h"
 
@@ -239,6 +240,28 @@ int st_fdd_mount_hook(int index, const char *name, fileTYPE *f, int *writable)
 {
 	if (!is_st() || index < 0 || index >= ST_FDD_SLOTS) return 1;
 	st_fdd_unmount(index);
+
+	// IPF: decoded with libcapsimg.so into an SCP in /tmp, which the core
+	// reads by itself like any SCP image
+	if (has_ext(name, "ipf"))
+	{
+		char tmp[64], err[256] = "";
+		snprintf(tmp, sizeof(tmp), "/tmp/st_ipf_%d.scp", index);
+		if (!st_ipf_to_scp(getFullPath(name), tmp, err, sizeof(err)))
+		{
+			st_log("%s: %s", name, err);
+			return 0;
+		}
+		if (!FileOpenEx(f, tmp, O_RDONLY, 0, 0))
+		{
+			st_log("%s: cannot open %s", name, tmp);
+			return 0;
+		}
+		*writable = 0;
+		st_log("drive %c: %s as SCP (%lld bytes)", 'A' + index, name, (long long)f->size);
+		return 1;
+	}
+
 	if (!has_ext(name, "stx")) return 1;
 
 	if (f->size <= 0 || f->size > ST_FDD_MAX_FILE)
