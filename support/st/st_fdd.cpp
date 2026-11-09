@@ -258,6 +258,9 @@ int st_fdd_mount_hook(int index, const char *name, fileTYPE *f, int *writable)
 			st_log("%s: cannot open %s", name, tmp);
 			return 0;
 		}
+		// the OSD shows the IPF, not the temporary file
+		const char *base = strrchr(name, '/');
+		snprintf(f->name, sizeof(f->name), "%s", base ? base + 1 : name);
 		*writable = 0;
 		flux_seen = true;
 		st_log("drive %c: %s as SCP (%lld bytes)", 'A' + index, name, (long long)f->size);
