@@ -6,11 +6,6 @@
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
-//
-// The core reads SCP flux images by itself. An IPF is decoded with the CAPS
-// library (libcapsimg.so, installed separately, as for the Minimig core)
-// into an SCP file in /tmp, and that file is mounted instead. Each track
-// gets a few revolutions, the weak bits drawn again for each one.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,7 +47,7 @@ static struct
 	CAPSLOCKTRACK lock_track;
 	CAPSUNLOCKTRACK unlock_track;
 	CAPSUNLOCKALLTRACKS unlock_all;
-	CAPSSETREVOLUTION set_rev;   // optional
+	CAPSSETREVOLUTION set_rev;
 } caps;
 
 static bool caps_load(char *err, size_t errlen)
@@ -61,7 +56,7 @@ static bool caps_load(char *err, size_t errlen)
 	if (caps.tried) { snprintf(err, errlen, "libcapsimg.so not available"); return false; }
 	caps.tried = true;
 
-	const char *env = getenv("ST_CAPSIMG");    // test tools
+	const char *env = getenv("ST_CAPSIMG");
 	const char *paths[] = { env, "/media/fat/linux/libcapsimg.so", "/media/fat/libcapsimg.so", "/media/fat/linux/CAPSIMG/libcapsimg.so" };
 	for (const char *p : paths)
 	{
@@ -97,8 +92,6 @@ static void put32(std::vector<uint8_t> &v, size_t at, uint32_t x)
 	v[at] = x; v[at + 1] = x >> 8; v[at + 2] = x >> 16; v[at + 3] = x >> 24;
 }
 
-// One revolution of a locked track as flux in 25 ns ticks. carry is the time
-// since the last transition, kept from one revolution to the next.
 static void track_flux(const CapsTrackInfoT2 &ti, double &carry, std::vector<uint8_t> &data, double &rev_ns, uint32_t &seed)
 {
 	rev_ns = 0;
@@ -113,7 +106,6 @@ static void track_flux(const CapsTrackInfoT2 &ti, double &carry, std::vector<uin
 
 	if ((ti.type & CTIT_MASK_TYPE) == ctitNoise || !ti.trackbuf || !ti.tracklen)
 	{
-		// unformatted: transitions 2..10 us apart for 200 ms
 		while (rev_ns < 200e6)
 		{
 			seed = seed * 1103515245u + 12345u;
@@ -125,8 +117,6 @@ static void track_flux(const CapsTrackInfoT2 &ti, double &carry, std::vector<uin
 		return;
 	}
 
-	// cell length: the timing table (per byte, 1000 = nominal 2 us) for
-	// variable density tracks, else 2 us scaled to a 200 ms turn
 	double scale = 1.0;
 	bool var = (ti.type & CTIT_MASK_TYPE) == ctitVar && ti.timebuf && ti.timelen;
 	if (!var)
@@ -172,15 +162,15 @@ bool st_ipf_to_scp(const char *ipf_path, const char *scp_path, char *err, size_t
 		if (cyls > 84) cyls = 84;
 		std::vector<uint8_t> out(0x10 + 168 * 4, 0);
 		memcpy(out.data(), "SCP", 3);
-		out[3] = 0x19;                 // version 1.9
-		out[4] = 0x14;                 // Atari ST
+		out[3] = 0x19;
+		out[4] = 0x14;
 		out[5] = IPF_REVS;
 		out[6] = 0;
 		out[7] = (uint8_t)(cyls * 2 - 1);
-		out[8] = 0x01;                 // index aligned
-		out[9] = 0;                    // 16 bit
-		out[10] = 0;                   // both heads
-		out[11] = 0;                   // 25 ns
+		out[8] = 0x01;
+		out[9] = 0;
+		out[10] = 0;
+		out[11] = 0;
 
 		uint32_t seed = 0x5EED1234;
 		for (int cyl = 0; cyl < cyls; cyl++)

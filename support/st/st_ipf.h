@@ -12,8 +12,6 @@
 
 #include <stddef.h>
 
-// Decode an IPF image with libcapsimg.so (loaded on first use) and write it
-// as an SCP flux image. Returns false with a message in err.
 bool st_ipf_to_scp(const char *ipf_path, const char *scp_path, char *err, size_t errlen);
 
 #endif

@@ -16,12 +16,10 @@
 static inline uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static inline uint32_t rd32(const uint8_t *p) { return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24)); }
 
-// Standard WD1772 layout used by Pasti for tracks stored without sector blocks
 #define STD_GAP1        60
 #define STD_GAP2        12
-#define STD_RAW_SECTOR  (12 + 3 + 1 + 4 + 2 + 22 + 12 + 3 + 1 + 512 + 2 + 40)   // 614
+#define STD_RAW_SECTOR  (12 + 3 + 1 + 4 + 2 + 22 + 12 + 3 + 1 + 512 + 2 + 40)
 
-// Revision 0 Macrodos timing table (from Hatari, Pasti 0.4b behaviour)
 static const uint8_t timing_rev0[] = {
 	0x00,0x7f,0x00,0x7f,0x00,0x7f,0x00,0x7f,0x00,0x7f,0x00,0x7f,0x00,0x7f,0x00,0x7f,
 	0x00,0x85,0x00,0x85,0x00,0x85,0x00,0x85,0x00,0x85,0x00,0x85,0x00,0x85,0x00,0x85,
@@ -109,7 +107,7 @@ bool StxImage::parse(const uint8_t *buf, size_t len)
 
 bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 {
-	(void)end;   // all accesses are checked against the whole file with in()
+	(void)end;
 	uint32_t fuzzy_size = rd32(p + 4);
 	int nsect = rd16(p + 8);
 	t.flags = rd16(p + 10);
@@ -125,7 +123,6 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 
 	if (t.simple)
 	{
-		// only nsect sectors of 512 bytes, standard positions; mfm_size is in bits
 		if (nsect && !in(q, (size_t)nsect * 512)) return false;
 		int pos = STD_GAP1 + STD_GAP2 + 4;
 		for (int s = 0; s < nsect; s++)
@@ -157,7 +154,7 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 	if (!in(desc, (size_t)nsect * 16)) return false;
 	const uint8_t *fuzzy = desc + nsect * 16;
 	if (!in(fuzzy, fuzzy_size)) return false;
-	const uint8_t *tdata = fuzzy + fuzzy_size;   // sector data offsets are relative to this
+	const uint8_t *tdata = fuzzy + fuzzy_size;
 	const uint8_t *sectors_data = tdata;
 
 	if (t.flags & STX_TRK_TRACK_IMAGE)
@@ -214,7 +211,7 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 		if (m_revision == 2)
 		{
 			if (!in(tim, 4)) return false;
-			tp = tim + 4;   // u16 flags, u16 size, then 2 bytes per 16 data bytes
+			tp = tim + 4;
 		}
 		for (StxSector &sec : t.sectors)
 		{
@@ -226,7 +223,7 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 				sec.timing = tp;
 				tp += n;
 			}
-			else if (sec.size <= 512) sec.timing = timing_rev0;   // table covers 512 bytes
+			else if (sec.size <= 512) sec.timing = timing_rev0;
 		}
 	}
 
@@ -237,19 +234,9 @@ bool StxImage::parse_track(const uint8_t *p, const uint8_t *end, StxTrack &t)
 	return true;
 }
 
-// ---------------------------------------------------------------------------
-// STX -> track
-// ---------------------------------------------------------------------------
-
 #define NOMINAL_REV_NS   200000000.0
 #define NOMINAL_BYTE_NS  32000.0
 
-// bit_position: Pasti revision 2 (and later tools) store a time from the
-// index in 4 us units, 50000 per 200 ms turn whatever the length of the
-// track; revision 0 counts the bits of the track itself (its read track
-// images line up with bit_position / 8 on tracks of any length). On a track
-// written faster or slower than standard the two differ by up to 5 % of a
-// turn (Turrican II: 6597 bytes; Ghouls'n Ghosts track 79: 5903).
 double stx_bitpos_bytes(const StxTrack &t, int bit_position)
 {
 	if (t.bitpos_time) return bit_position * (double)t.length / 50000.0;
@@ -264,19 +251,14 @@ double stx_bitpos_ns(const StxTrack &t, int bit_position)
 
 static double bitpos_bytes(const StxTrack &t, int bit_position) { return stx_bitpos_bytes(t, bit_position); }
 
-// Time to read data byte i of a sector, 0 if the sector uses standard timing
 static double sector_byte_ns(const StxSector &sec, int i)
 {
 	if (sec.timing)
 	{
 		int blk = i >> 4;
 		uint16_t tv = (uint16_t)((sec.timing[blk * 2] << 8) | sec.timing[blk * 2 + 1]);
-		// 1 unit = 32 FDC cycles at 8 MHz, plus 28 cycles per block of 16 bytes
 		return (tv * 32.0 + 28.0) * 125.0 / 16.0;
 	}
-	// a read time far from the standard rate is not a speed the drive could
-	// have read at (Dragon's Lair: 1024 byte sectors listed with twice their
-	// time): standard timing then
 	if (sec.read_time)
 	{
 		double b = sec.read_time * 1000.0 / sec.size;
@@ -295,16 +277,9 @@ static double sector_fixed_ns(const StxSector &sec)
 
 static bool is_garbled_sync(uint8_t v)
 {
-	// bytes the WD1772 returns in read track for the first A1 of a sync
-	// sequence, before it has locked on the missing clock (see MAME wd_fdc.cpp)
 	return v == 0xA1 || v == 0x14 || v == 0xC2 || v == 0x0A || v == 0xE1 || v == 0xCE;
 }
 
-// Read track only aligns on sync marks, so the gap bytes it returns before
-// the first sync after the index (or after a field) are often the gap read
-// out of phase: 4E comes out as one of its bit rotations, 00 as FF. Runs of
-// such bytes go back to the real gap values, as MAME does in pasti_dsk.cpp
-// (Skyfox track 79 starts with 27 27 27..., a 4E gap read 3 cells late).
 static void unshift_image_gaps(TrackBuilder &tb)
 {
 	static const uint8_t rot4e[] = { 0x4e, 0x21, 0x9c, 0x42, 0x39, 0x84, 0x72, 0x09,
@@ -326,9 +301,6 @@ static void unshift_image_gaps(TrackBuilder &tb)
 	}
 }
 
-// Rebuild the sync marks of a read-track image. "x A1 A1 mark" in read
-// track output can only come from real sync marks on the disk, because the
-// WD1772 re-aligned its byte boundary there.
 static void mark_image_syncs(TrackBuilder &tb)
 {
 	int n = tb.size();
@@ -356,7 +328,6 @@ static uint16_t id_crc(const uint8_t *id)
 	return st_crc16_buf(st_crc16_buf(0xFFFF, mark, 4), id, 4);
 }
 
-// Look for "A1 A1 FE/FF tr hd sc sz" in the image around pos (pos = first A1)
 static int find_header(const StxTrack &t, const StxSector &s, int pos, int window)
 {
 	int n = t.image_size;
@@ -391,7 +362,6 @@ static int find_dam(const StxTrack &t, int hpos)
 	return -1;
 }
 
-// put a byte unless it belongs to another sector's data (used for gaps/preambles)
 static void put_gap(TrackBuilder &tb, int pos, uint8_t v)
 {
 	if (!tb.at(pos).owner) tb.put(pos, v, 0);
@@ -407,17 +377,11 @@ static void put_owned(TrackBuilder &tb, int pos, uint8_t v, uint8_t owner, uint8
 			rep->overlaps++;
 			if (b.value != v) rep->overlap_mismatch++;
 		}
-		// a sync mark of a field nested in another sector's data stays a sync
-		// mark: the outer sector reads the same byte value either way
 		if (b.value == v && b.mark && !mark) mark = b.mark;
 	}
 	tb.put(pos, v, owner, mark);
 }
 
-
-// How a sector's data field reads on the cells: number of bytes equal to the
-// STX (stable bits only), and the first differing byte. The WD keeps the byte
-// grid it took from the data mark, so after a phase jump it reads shifted.
 static int read_score(const TrackBuilder::Cells &cs, int c0, const StxSector &sec, int *first_bad)
 {
 	int total = (int)cs.bit.size(), eq = 0;
@@ -446,11 +410,6 @@ static bool is_rot4e(uint8_t v)
 	return false;
 }
 
-// Bytes a protected sector recorded after a phase jump are its out-of-phase
-// view of the track, not the track itself. Where they are still its own
-// (no other field was written there) they become the gap they show: runs
-// of FF become 00, of 4E rotations 4E, and other bytes carry on the gap or
-// preamble before them (the byte that straddles a sync mark, e.g. "fe").
 static void unshift_owned(TrackBuilder &tb, int from, int to, uint8_t owner)
 {
 	uint8_t last = 0x4E;
@@ -466,8 +425,6 @@ static void unshift_owned(TrackBuilder &tb, int from, int to, uint8_t owner)
 	}
 }
 
-// Cells fit_cells() may not force: IDs, data marks and the fields of sectors
-// without an intentional CRC error.
 static void lock_cells(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, const TrackBuilder &tb, const TrackBuilder::Cells &cs, std::vector<uint8_t> &lock)
 {
 	int n = tb.size(), total = (int)cs.bit.size();
@@ -490,7 +447,6 @@ static void lock_cells(const StxTrack &t, const std::vector<int> &hpos, const st
 	}
 }
 
-// read_score() counting as equal the bytes fit_cells() can make equal
 static int read_score_fix(const TrackBuilder::Cells &cs, const std::vector<uint8_t> &lock, int c0, const StxSector &sec, int *first_bad)
 {
 	int total = (int)cs.bit.size(), eq = 0;
@@ -511,7 +467,7 @@ static int read_score_fix(const TrackBuilder::Cells &cs, const std::vector<uint8
 	return eq;
 }
 
-struct Span { int from, to; };   // [from, to) in track bytes, may exceed the size (wrap)
+struct Span { int from, to; };
 
 static bool inside(const std::vector<Span> &spans, int pos, int n)
 {
@@ -524,13 +480,6 @@ static bool inside(const std::vector<Span> &spans, int pos, int n)
 	return false;
 }
 
-// Protected sectors (bad CRC) whose data does not read as recorded may cross
-// splices of a track mastered in several passes: the original WD went on
-// with its old byte grid and read what follows out of phase (Turrican tracks
-// 7-10: sector 0 reads the data mark and data of sector 16 one cell off, and
-// sector 16 reads the ID of sector 1 off phase). Search, just before the
-// first differing byte, the jump (position and 1..15 cells) that makes the
-// sector read as recorded, without cutting a sound sector's fields.
 static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, TrackBuilder &tb, StxBuildReport *rep)
 {
 	int n = tb.size(), ns = (int)t.sectors.size();
@@ -552,7 +501,6 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 	std::sort(order.begin(), order.end(), [&](int a, int b) { return dpos[a] < dpos[b]; });
 
 	TrackBuilder::Cells cs;
-	// fixable bytes of all protected sectors: a jump for one must not cost the others
 	auto total_score = [&](const TrackBuilder::Cells &c, const std::vector<uint8_t> &lk) {
 		int sum = 0, fb;
 		for (int o : order) sum += read_score_fix(c, lk, c.byte_cell[tb.wrap(dpos[o] + 4)], t.sectors[o], &fb);
@@ -572,18 +520,13 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 			if (bad >= sec.size) break;
 			int all_score = total_score(cs, lock);
 
-			// a splice is at a boundary (gap / preamble / field), up to 64 bytes
-			// before the first byte that reads differently. Every candidate is
-			// first scored on the cells shifted in place (cheap: the ARM of the
-			// DE10-Nano would need seconds to rebuild the track for each); the
-			// best few are then built for real.
 			struct Cand { int pos, k, bad, score; };
 			std::vector<Cand> cands;
 			int total = (int)cs.bit.size(), c0 = cs.byte_cell[tb.wrap(start)];
 			for (int b = bad > 64 ? bad - 64 : 1; b <= bad; b++)
 			{
 				int pos = start + b;
-				if (pos >= n || inside(keep, pos, n)) continue;   // the index splice is fit_splice's job
+				if (pos >= n || inside(keep, pos, n)) continue;
 				if (b != bad && tb.at(pos).value == tb.at(pos - 1).value && tb.at(pos).owner == tb.at(pos - 1).owner) continue;
 				int J = cs.byte_cell[pos];
 				for (int k = -15; k < 16; k++)
@@ -615,8 +558,6 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 			std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b2) { return a.bad != b2.bad ? a.bad > b2.bad : a.score > b2.score; });
 			if (cands.size() > 4) cands.resize(4);
 
-			// a sector read across the index also depends on the splice cells:
-			// after a jump they are fitted again
 			bool cross = start + sec.size > n;
 			int best_score = score, best_pos = -1, best_k = 0, best_bad = bad, best_extra = tb.extra_cells(), best_all = all_score;
 			for (const Cand &cd : cands)
@@ -635,7 +576,6 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 					{ best_score = sc; best_pos = cd.pos; best_k = cd.k; best_bad = fb; best_extra = e; best_all = all; }
 				}
 			}
-			// keep a jump only if the sector now reads as recorded much further on
 			if (best_pos < 0 || best_bad - bad < 8 || best_score <= score || best_all <= all_score) break;
 			tb.add_jump(best_pos, best_k);
 			tb.set_extra_cells(best_extra);
@@ -646,10 +586,6 @@ static void fit_jumps(const StxTrack &t, const std::vector<int> &hpos, const std
 	}
 }
 
-// A sector whose data runs past the index was read by the original WD
-// across the write splice. Find how many extra cells at the end of the turn
-// make its recorded data match (Skyfox, track 79: sector 2C reads the ID of
-// sector 1 one cell out of phase).
 static void fit_splice(const StxTrack &t, const std::vector<int> &dpos, TrackBuilder &tb, StxBuildReport *rep)
 {
 	int n = tb.size();
@@ -675,13 +611,6 @@ static void fit_splice(const StxTrack &t, const std::vector<int> &dpos, TrackBui
 	if (rep) rep->splice_cells = best_k;
 }
 
-// After the layout is final: a protected sector (bad CRC) that still reads
-// differently is read out of phase with the fields around it, so its data
-// cells are their clock cells. Set those cells to the recorded data bits
-// (a zero next to a zero clock is a stretch without flux, which the WD reads
-// as 0 in both phases). The fields of sound sectors and all IDs are left
-// alone; if anything that read right before reads worse after, nothing is
-// changed.
 static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, TrackBuilder &tb, StxBuildReport *rep)
 {
 	int ns = (int)t.sectors.size();
@@ -713,8 +642,6 @@ static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std
 	std::vector<int> before, after;
 	scores(before);
 
-	// cells a protected sector reads as stable data: another one's fuzzy bit
-	// cannot make them random
 	std::vector<uint8_t> stable(total, 0);
 	for (int s : prot)
 	{
@@ -738,7 +665,6 @@ static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std
 				int want = (sec.data[i] >> (7 - k)) & 1;
 				if (sec.fuzzy && !((sec.fuzzy[i] >> (7 - k)) & 1))
 				{
-					// a fuzzy bit: its cell must read randomly
 					if (!lock[c] && !cs.weak[c] && !stable[c]) { tb.set_weak_cell(c); forced++; }
 					continue;
 				}
@@ -758,8 +684,6 @@ static void fit_cells(const StxTrack &t, const std::vector<int> &hpos, const std
 	if (rep) rep->forced_cells = forced;
 }
 
-// Fields that should read right but do not: IDs listed as readable, and the
-// data with its CRC of sectors without an intentional CRC error or fuzzy bits.
 static int bad_fields(const StxTrack &t, const std::vector<int> &hpos, const std::vector<int> &dpos, const TrackBuilder &tb)
 {
 	TrackBuilder::Cells cs;
@@ -777,8 +701,6 @@ static int bad_fields(const StxTrack &t, const std::vector<int> &hpos, const std
 		const StxSector &sec = t.sectors[s];
 		if (!(sec.status & STX_SECT_RNF))
 		{
-			// three A1 sync marks, FE, the ID and a CRC that is right unless
-			// the STX says it is not
 			int h0 = cs.byte_cell[tb.wrap(hpos[s])];
 			bool ok = true;
 			for (int i = 0; i < 3 && ok; i++)
@@ -819,13 +741,6 @@ static int bad_fields(const StxTrack &t, const std::vector<int> &hpos, const std
 	return bad;
 }
 
-// Fields nested in the data of another sector (sector in sector protections,
-// 70 overlapping sectors on track 79 of Bubble Ghost, Light Corridor, Ishar)
-// are shown by that data byte for byte. Where the data of the sector before
-// shows the sync marks and mark of a nested ID or data mark one to three
-// bytes away (an ID up to 16) from where it was placed, the field moves there: the recorded
-// data of the outer sector is more exact than the read track image or the
-// timing the position came from.
 static void align_nested(const StxTrack &t, std::vector<int> &hpos, std::vector<int> &dpos, int n)
 {
 	int ns = (int)t.sectors.size();
@@ -834,7 +749,6 @@ static void align_nested(const StxTrack &t, std::vector<int> &hpos, std::vector<
 	for (int s = 0; s < ns; s++) if (dpos[s] >= 0) order.push_back(s);
 	std::sort(order.begin(), order.end(), [&](int a, int b) { return dpos[a] < dpos[b]; });
 
-	// the nearest sector before pos whose data covers it
 	auto outer = [&](int pos, int self) {
 		int best = -1, best_d = n;
 		for (int a : order)
@@ -853,7 +767,6 @@ static void align_nested(const StxTrack &t, std::vector<int> &hpos, std::vector<
 	for (int b : order)
 	{
 		const StxSector &sb = t.sectors[b];
-		// the ID, then the data mark of b
 		for (int field = 0; field < 2; field++)
 		{
 			int pos = field ? dpos[b] : hpos[b];
@@ -866,8 +779,6 @@ static void align_nested(const StxTrack &t, std::vector<int> &hpos, std::vector<
 			else { memcpy(pat + 4, sb.id, 4); len = 8; }
 			int off = wrap(pos - (dpos[a] + 4));
 			if (match(t.sectors[a], off, pat, len)) continue;
-			// an ID (with its track and sector) is distinctive enough to look
-			// further: one missing from the image was placed by time only
 			int range = field ? 3 : 16;
 			for (int k = 1; k <= range; k++)
 			{
@@ -878,7 +789,6 @@ static void align_nested(const StxTrack &t, std::vector<int> &hpos, std::vector<
 				if (field) dpos[b] = wrap(dpos[b] + dk);
 				else
 				{
-					// the data mark keeps its distance from the ID, then is checked itself
 					hpos[b] = wrap(hpos[b] + dk);
 					dpos[b] = wrap(dpos[b] + dk);
 				}
@@ -894,9 +804,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 
 	const StxTrack *t = img.find(cyl, head);
 
-	// A track image without sectors and without any sync sequence is the
-	// read-track dump of an unformatted track: random bits, different on
-	// every read. Play it back as noise rather than as fixed bytes.
 	bool noise_image = false;
 	if (t && t->image && t->sectors.empty())
 	{
@@ -920,11 +827,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 
 	std::vector<int> hpos(ns), dpos(ns, -1);
 
-	// With a track image the ID fields are located inside it, so the gaps
-	// and their exact byte counts come from a real read track. An image in
-	// which fewer than half of the ID fields can be found is not usable
-	// (it was read out of sync, or made by a tool that did): the track is
-	// then rebuilt from the sector list alone.
 	bool use_image = allow_image && t->image != nullptr;
 	std::vector<bool> in_image(ns, false);
 	int delta = 0;
@@ -964,9 +866,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		{
 			if (!in_image[s])
 			{
-				// placed by time, or on the sync marks of an ID field the image
-				// shows nearby with damaged contents (read out of phase): two ID
-				// fields a few bytes apart would hide each other
 				int e = (int)floor(bitpos_bytes(*t, t->sectors[s].bit_position) + 0.5) - 4 + delta;
 				hpos[s] = tb.wrap(e);
 				for (int d = 0; d <= 16; d++)
@@ -988,7 +887,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 			}
 			else if (!(t->sectors[s].status & STX_SECT_RNF))
 			{
-				// the data mark is only searched behind an ID found in the image
 				dpos[s] = find_dam(*t, hpos[s]);
 				if (dpos[s] >= 0) rep->data_found_in_image++;
 			}
@@ -996,10 +894,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 	}
 	else
 	{
-		// bit_position is a time from the index (see bitpos_bytes). Here a
-		// turn is 200 ms and the bytes with standard timing last free_byte, so
-		// a sector read slower or faster than standard moves the following ID
-		// fields by the equivalent number of bytes, to keep them on time.
 		double fixed = 0;
 		int fixed_bytes = 0;
 		for (const StxSector &sec : t->sectors)
@@ -1011,9 +905,9 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		if (fixed_bytes && n > fixed_bytes) free_byte = (NOMINAL_REV_NS - fixed) / (n - fixed_bytes);
 		if (free_byte < NOMINAL_BYTE_NS * 0.85) free_byte = NOMINAL_BYTE_NS * 0.85;
 		if (free_byte > NOMINAL_BYTE_NS * 1.15) free_byte = NOMINAL_BYTE_NS * 1.15;
-		double unit = NOMINAL_REV_NS / n;   // average time of a byte of the track
+		double unit = NOMINAL_REV_NS / n;
 
-		double shift = 0;   // bytes
+		double shift = 0;
 		for (int s = 0; s < ns; s++)
 		{
 			const StxSector &sec = t->sectors[s];
@@ -1024,13 +918,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		}
 	}
 
-	// An image that could not be used for the layout (its ID fields read out
-	// of phase, as on track 41 of many Pasti dumps) still shows what gap 1
-	// holds. Some protections keep a signature there and check it with read
-	// track (Union Demo: "tex" on track 41): those bytes are taken from the
-	// image, up to the preamble of the first ID field, and the fields are
-	// moved (all together) to where the image shows them, which is where
-	// they are on the disk. Runs of 4E read out of phase go back to 4E.
 	if (!use_image && allow_image && t->image && ns)
 	{
 		const uint8_t *im = t->image;
@@ -1058,10 +945,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		}
 	}
 
-	// Data marks not found in an image go at the standard distance from the
-	// ID, but a sound sector cannot run into the next ID: on tightly packed
-	// tracks (Dragon's Lair, 11 sectors) gap 2 is shorter, so the data mark
-	// moves closer to its ID, not before the end of the ID field.
 	for (int s = 0; s < ns; s++)
 	{
 		const StxSector &sec = t->sectors[s];
@@ -1074,7 +957,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 			{
 				if (o == s) continue;
 				int d = tb.wrap(hpos[o] - hpos[s]);
-				// an ID the data itself carries is nested on purpose, not in the way
 				int r = d - off - 4;
 				if (r >= 0 && r + 8 <= sec.size && sec.data[r + 3] == 0xFE && !memcmp(sec.data + r + 4, t->sectors[o].id, 4)) continue;
 				if (d > 0 && d < next) next = d;
@@ -1087,7 +969,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 
 	align_nested(*t, hpos, dpos, n);
 
-	// pass 0: standard preambles (only over gap bytes)
 	if (!use_image)
 	{
 		for (int s = 0; s < ns; s++)
@@ -1097,11 +978,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		}
 	}
 
-	// pass 1: data fields. Sectors with an intentional CRC error or fuzzy
-	// bits go first and sound sectors last, so where they overlap the sound
-	// ones win: on the original disk those read correctly, while the
-	// protected one has a bad CRC anyway (Skyfox: the data of sector 2C on
-	// track 79 runs past the index over the ID and data mark of sector 1).
 	for (int round = 0; round < 2; round++)
 	for (int s = 0; s < ns; s++)
 	{
@@ -1124,11 +1000,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		tb.set_weak(d + 3, 0);
 		crc = st_crc16(crc, dam);
 
-		// A protected sector (bad CRC) whose data runs past the index was read
-		// across the write splice: after the index the original WD saw the
-		// start of the track out of phase. Its bytes are written up to the
-		// index only; the rest is what the track holds there, read through the
-		// splice cells chosen by fit_splice().
 		bool stop_at_index = (sec.status & STX_SECT_CRC_ERROR) && d + 4 + sec.size > tb.size();
 
 		for (int i = 0; i < sec.size; i++)
@@ -1151,7 +1022,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 
 		if (sec.status & STX_SECT_CRC_ERROR)
 		{
-			// keep the CRC bytes of the image if they are already wrong
 			bool img_bad = false;
 			if (use_image)
 			{
@@ -1168,7 +1038,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		tb.set_weak(d + 5 + sec.size, 0);
 	}
 
-	// pass 2: ID fields on top
 	for (int s = 0; s < ns; s++)
 	{
 		const StxSector &sec = t->sectors[s];
@@ -1184,12 +1053,6 @@ static bool build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb
 		id[4] = stored >> 8;
 		id[5] = stored & 0xFF;
 
-		// an ID nested in another sector's data normally carries the same byte
-		// values (the protection was mastered that way); differences are
-		// counted in rep->overlap_mismatch
-		// an ID listed by the STX was readable, so it is never weak, even when
-		// it lies inside a fuzzy sector's data (OutRun, HLS protection: the
-		// fuzzy sector 0B reads the gap and the ID of sector 6 one bit off)
 		for (int i = 0; i < 3; i++) put_owned(tb, h + i, 0xA1, owner, TrackBuilder::MARK_A1, rep);
 		put_owned(tb, h + 3, 0xFE, owner, 0, rep);
 		for (int i = 0; i < 6; i++) put_owned(tb, h + 4 + i, id[i], owner, 0, rep);
@@ -1209,10 +1072,6 @@ bool stx_build_track(const StxImage &img, int cyl, int head, TrackBuilder &tb, S
 	StxBuildReport dummy;
 	if (!rep) rep = &dummy;
 	bool ok = build_track(img, cyl, head, tb, rep, true);
-	// A track image can mislead the layout (a false ID or data mark found in
-	// it, an ID missing from it placed by time next to image positions): if
-	// a sound field then reads wrong, rebuild from the sector list alone and
-	// keep whichever reads better.
 	if (ok && rep->used_image && rep->bad_fields)
 	{
 		TrackBuilder tb2;

@@ -10,8 +10,10 @@
 
 // Apple 2 support
 #include "support/a2/dsk2nib_lib.h"
+#include "support/a2/a2_nib_codec.h"
 // Apple IIgs disk integration
 #include "support/a2/iigs_disk.h"
+#include "support/a2/iigs_uthernet2.h"
 // Apple III
 #include "support/a3/a3_disk.h"
 
@@ -29,6 +31,9 @@
 // HP 9000 family support
 #include "support/hp9k/hp9k.h"
 #include "support/hp9k/hp9k_enet.h"
+#include "support/3b1/3b1_eth.h"
+#include "support/ibmrs6k/ibmrs6k.h"
+#include "support/ibmrs6k/ibmrs6k_enet.h"
 #include "support/sgi/sgi.h"
 #include "support/sgi/sgi_enet.h"
 
@@ -97,3 +102,6 @@
 
 // NEC PC-FX support
 #include "support/pcfx/pcfx.h"
+
+// VideoBrain support
+#include "support/videobrain/videobrain.h"

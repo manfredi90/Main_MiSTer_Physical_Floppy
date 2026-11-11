@@ -63,7 +63,6 @@ void TrackBuilder::set_weak(int pos, uint8_t weak_mask)
 	at(pos).weak = weak_mask;
 }
 
-// Standard MFM: clock bit is 1 only between two 0 data bits
 static uint16_t mfm_encode(uint8_t value, int &prev_bit)
 {
 	uint16_t w = 0;
@@ -77,7 +76,6 @@ static uint16_t mfm_encode(uint8_t value, int &prev_bit)
 	return w;
 }
 
-// Expand a data-bit weak mask (bit 7 first) to the data cells of a word
 static uint16_t weak_to_cells(uint8_t weak)
 {
 	uint16_t w = 0;
@@ -87,16 +85,13 @@ static uint16_t weak_to_cells(uint8_t weak)
 
 struct TimingRun
 {
-	uint32_t start;   // word
+	uint32_t start;
 	uint32_t words;
-	double   cell;    // units (1/16 ns)
+	double   cell;
 };
 
 static void merge_runs(std::vector<TimingRun> &runs, size_t max_runs)
 {
-	// Merge neighbours whose cell lengths are closest until the table fits.
-	// The merged length is the time weighted average, so the total revolution
-	// time is preserved.
 	double threshold = 1.0;
 	while (runs.size() > max_runs)
 	{
@@ -145,7 +140,6 @@ double TrackBuilder::free_byte_ns() const
 	}
 	double free_byte = nominal_byte;
 	if (free_bytes) free_byte = (m_rev_ns - fixed_ns) / free_bytes;
-	// keep the derived speed physically plausible (+/- 15 %)
 	if (free_byte < nominal_byte * 0.85) free_byte = nominal_byte * 0.85;
 	if (free_byte > nominal_byte * 1.15) free_byte = nominal_byte * 1.15;
 	return free_byte;
@@ -160,7 +154,6 @@ void TrackBuilder::build_cells(Cells &out) const
 	out.bit.reserve(n * 16 + 64); out.weak.reserve(n * 16 + 64); out.ns.reserve(n * 16 + 64);
 	double free_byte = free_byte_ns();
 
-	// clock of the first byte depends on the last data bit of the track
 	const Byte &last = m_bytes[n - 1];
 	int prev = (last.mark == MARK_C2) ? 0 : (last.value & 1);
 	size_t j = 0;
@@ -170,8 +163,6 @@ void TrackBuilder::build_cells(Cells &out) const
 		const Byte &b = m_bytes[i];
 		float cell_ns = (float)((b.time_ns > 0 ? b.time_ns : free_byte) / 16.0);
 
-		// a phase jump: the cells before it continue (the gap or data just
-		// written goes on for a few more cells), then this byte starts
 		while (j < m_jumps.size() && m_jumps[j].first < i) j++;
 		if (j < m_jumps.size() && m_jumps[j].first == i && out.bit.size() > 16)
 		{
@@ -188,7 +179,6 @@ void TrackBuilder::build_cells(Cells &out) const
 			}
 			else
 			{
-				// the next pass starts before the end of the previous byte
 				for (int e = 0; e < -k; e++) { out.bit.pop_back(); out.weak.pop_back(); out.ns.pop_back(); }
 			}
 			prev = out.bit.back();
@@ -208,8 +198,6 @@ void TrackBuilder::build_cells(Cells &out) const
 		}
 	}
 
-	// extra cells at the write splice by the index: the gap at the start
-	// of the track continues across it, only its phase changes
 	if (m_extra)
 	{
 		float cell_ns = out.ns.back();
@@ -219,8 +207,6 @@ void TrackBuilder::build_cells(Cells &out) const
 			out.weak.push_back(0);
 			out.ns.push_back(cell_ns);
 		}
-		// the first cell of the track now follows the last extra cell: apply
-		// the MFM clock rule to it again (1 only between two 0 cells)
 		if (!m_bytes[0].mark)
 			out.bit[0] = (!out.bit.back() && !out.bit[1]) ? 1 : 0;
 	}
@@ -263,16 +249,14 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 	int total = (int)cs.bit.size();
 	int nwords = (total + 15) / 16;
 
-	// ---- cells ----
 	for (int c = 0; c < total; c++) if (cs.bit[c]) cw[c >> 4] |= 0x8000 >> (c & 15);
 
-	// ---- timing: one length per word (that of its first cell) ----
 	std::vector<TimingRun> runs;
 	double rev = 0;
 	for (int c = 0; c < total; c++) rev += cs.ns[c];
 	for (int w = 0; w < nwords; w++)
 	{
-		double cell = cs.ns[w * 16] * 16.0;    // 1/16 ns units
+		double cell = cs.ns[w * 16] * 16.0;
 		if (!runs.empty() && fabs(runs.back().cell - cell) < 0.5) runs.back().words++;
 		else runs.push_back(TimingRun{ (uint32_t)w, 1, cell });
 	}
@@ -289,7 +273,6 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 	if (runs.size() > 1) flags |= ST_MFMT_F_VARTIME;
 	hdr->rev_time_ns = (uint32_t)(rev + 0.5);
 
-	// ---- weak cells: one mask word per track word ----
 	std::vector<uint16_t> wmask(nwords, 0);
 	for (int c = 0; c < total; c++) if (cs.weak[c]) wmask[c >> 4] |= 0x8000 >> (c & 15);
 	struct Seg { int start, words; };
@@ -300,7 +283,6 @@ bool TrackBuilder::encode(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_t *cel
 		if (!segs.empty() && segs.back().start + segs.back().words == w) segs.back().words++;
 		else segs.push_back(Seg{ w, 1 });
 	}
-	// too many segments: join the closest ones (gap words get an empty mask)
 	while (segs.size() > ST_MFMT_MAX_WEAK)
 	{
 		size_t best = 0;
@@ -351,7 +333,7 @@ void TrackBuilder::encode_noise(uint8_t cyl, uint8_t head, uint8_t *meta, uint8_
 	hdr->version = ST_MFMT_VERSION;
 	hdr->cylinder = cyl;
 	hdr->head = head;
-	hdr->flags = hd ? ST_MFMT_F_HD : 0;      // not formatted: the core generates noise
+	hdr->flags = hd ? ST_MFMT_F_HD : 0;
 	hdr->cell_count = hd ? 200000 : 100000;
 	hdr->timing_count = 1;
 	hdr->rev_time_ns = 200000000;

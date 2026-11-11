@@ -444,6 +444,13 @@ char is_marty()
 	return (is_marty_type == 1);
 }
 
+static int is_videobrain_type = 0;
+char is_videobrain()
+{
+	if (!is_videobrain_type) is_videobrain_type = strcasecmp(orig_name, "VideoBrain") ? 2 : 1;
+	return (is_videobrain_type == 1);
+}
+
 static int is_pcfx_type = 0;
 char is_pcfx()
 {
@@ -516,6 +523,7 @@ void user_io_read_core_name()
 	is_electron_type = 0;
 	is_saturn_type = 0;
 	is_marty_type = 0;
+	is_videobrain_type = 0;
 	is_pcfx_type = 0;
 	is_n64_type = 0;
 	is_uneon_type = 0;
@@ -1493,7 +1501,9 @@ void user_io_init(const char *path, const char *xml)
 	// Same for the NeXT ethernet bridge.
 	next_enet_stop();
 	sun_enet_stop();
+	b3_eth_stop();
 	hp9k_enet_stop();
+	ibmrs6k_enet_stop();
 	sgi_enet_stop();
 
 	// we need to set the directory to where the XML file (MRA) is
@@ -1649,6 +1659,8 @@ void user_io_init(const char *path, const char *xml)
 				// before the boot ROMs: the Sun-2's ID PROM goes in while it is held in reset
 				if (is_sun_family()) sun_enet_start();
 				if (is_hp9k_family()) hp9k_enet_start();
+				if (is_3b1()) b3_eth_start();
+				if (is_ibmrs6k()) ibmrs6k_enet_start();
 				if (is_sgi_family()) sgi_enet_start();
 
 				if (xml && isXmlName(xml) == 1)
@@ -1689,6 +1701,7 @@ void user_io_init(const char *path, const char *xml)
 					if (is_uneon()) x86_ide_set();
 					if (is_cdi()) cdi_load_root_nvram();
 					if (is_marty()) marty_init();
+					if (is_videobrain()) videobrain_init();
 					if (is_pcfx()) pcfx_init();
 
 					if (!strlen(path) || !user_io_file_tx(path, 0, 0, 0, 1))
@@ -2319,6 +2332,10 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 					const bool oric_a2_slot = oric_core && index < 2 && (ext_idx == 1 || ext_idx == 2);
 					const bool dsk_ext = !strcasecmp(name + len - 4, ".dsk");
 					const bool do_ext = len > 3 && !strcasecmp(name + len - 3, ".do");
+					// .po only on the floppy slots: the Apple-II core also mounts .po as a hard disk.
+					const bool po_ext = index < 2 && len > 3 && !strcasecmp(name + len - 3, ".po");
+					// A .dsk/.do/.po that is really a 35-track NIB is passed through as-is.
+					const bool nib_sized = sd_image[index].size == A2NIB_IMAGE_SIZE;
 					if (!strcasecmp(name + len - 4, ".d64")
 						|| !strcasecmp(name + len - 4, ".g64")
 						|| !strcasecmp(name + len - 4, ".d71")
@@ -2333,10 +2350,11 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 					{
 						img_type = G64_SUPPORT_HD | G64_SUPPORT_DS;
 					}
-					else if ((dsk_ext && (a2_core || oric_a2_slot)) || (do_ext && oric_a2_slot))
+					else if (!nib_sized && (((dsk_ext || do_ext || po_ext) && a2_core) || ((dsk_ext || do_ext) && oric_a2_slot)))
 					{
-						printf("FOUND A2 DSK/DO type\n");
+						printf("FOUND A2 %s type (nibblized on the fly)\n", po_ext ? "PO" : "DSK/DO");
 						sd_type[index] = SD_TYPE_A2;
+						a2_set_image(index, po_ext);
 					}
 				}
 
@@ -2362,6 +2380,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 				// Sun CD slot: CUE/CHD/raw image translation (support/sun)
 				if (ret) ret = sun_mount_hook(index, name, &sd_image[index], &writable);
 				if (ret) ret = hp9k_mount_hook(index, name, &sd_image[index], &writable);
+				if (ret) ret = ibmrs6k_mount_hook(index, name, &sd_image[index], &writable);
 				if (ret) ret = sgi_mount_hook(index, name, &sd_image[index], &writable);
 			if (ret) ret = next_mount_hook(index, name, &sd_image[index], &writable);
 				if (ret) ret = a3_mount_hook(index, name, &sd_image[index], &writable);
@@ -2369,7 +2388,6 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 				// Falcon SCSI slots: image registration, CD cue/bin translation (support/falcon)
 				if (ret) ret = falcon_scsi_mount_hook(index, name, &sd_image[index], &writable);
 
-				// Atari ST: STX images are served as MFMT tracks (support/st)
 				if (ret) ret = st_fdd_mount_hook(index, name, &sd_image[index], &writable);
 
 				if (ret && is_c128())
@@ -2395,6 +2413,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 		mac_cdrom_unmount(index);
 		sun_unmount(index);
 		hp9k_unmount(index);
+		ibmrs6k_unmount(index);
 		sgi_unmount(index);
 		next_unmount(index);
 		a3_unmount(index);
@@ -3409,6 +3428,7 @@ void user_io_poll()
 	if (pfloppy_mac_core()) pfloppy_mac_poll();
 	sun_poll();   // Sun SCSI family: write-buffer flushes
 	hp9k_poll();
+	ibmrs6k_poll();
 	sgi_poll();
 
 	if (is_minimig())
@@ -3453,8 +3473,11 @@ void user_io_poll()
 	}
 
 	next_enet_poll();
+	iigs_uthernet2_poll();
 	sun_enet_poll();
 	hp9k_enet_poll();
+	b3_eth_poll();
+	ibmrs6k_enet_poll();
 	sgi_enet_poll();
 
 	// The NeXT keeps a battery backed clock that the guest reads at
@@ -3595,8 +3618,8 @@ void user_io_poll()
 			else if ( sd_type[disk] == SD_TYPE_A2)
 			{
 				//if (op) printf("A2 %x %llu on %d\n", op,lba, disk);
-				if (op == 2) a2_writeDSK(&sd_image[disk], lba, ack);
-				else if (op & 1) a2_readDSK(&sd_image[disk], lba, ack);
+				if (op == 2) a2_writeDSK(&sd_image[disk], lba, ack, disk);
+				else if (op & 1) a2_readDSK(&sd_image[disk], lba, ack, disk);
 				else break;
 			}
 			else if ( sd_type[disk] == SD_TYPE_IIGS)
@@ -3623,6 +3646,10 @@ void user_io_poll()
 			{
 				if (hpop < 0) break;
 			}
+			else if (int rsop = ibmrs6k_sd_service(disk, &sd_image[disk], op, lba, sz, ack))
+			{
+				if (rsop < 0) break;
+			}
 			else if (int sgop = sgi_sd_service(disk, &sd_image[disk], op, lba, sz, ack))
 			{
 				if (sgop < 0) break;
@@ -3645,7 +3672,6 @@ void user_io_poll()
 			}
 			else if (int stop = st_fdd_sd_service(disk, op, lba, sz, ack))
 			{
-				// Atari ST MFMT track requests (support/st); SPI is done by the hook.
 				if (stop < 0) break;
 			}
 			else if (int falop = falcon_sd_service(disk, op, lba, sz, ack))
@@ -4145,6 +4171,7 @@ void user_io_poll()
 	if (is_pce()) pcecd_poll();
 	if (is_saturn()) saturn_poll();
 	if (is_marty()) marty_poll();
+	if (is_videobrain()) videobrain_poll();
 	if (is_pcfx()) pcfx_poll();
 	if (is_cdi()) cdi_poll();
 	if (is_psx()) psx_poll();
