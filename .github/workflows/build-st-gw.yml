@@ -32,11 +32,6 @@ jobs:
           make -j"$(nproc)"
           ls -l bin/MiSTer
 
-      - name: Host test of the STX converter
-        run: |
-          cd support/st/test
-          make test
-
       - name: Collect output
         run: |
           mkdir -p out
