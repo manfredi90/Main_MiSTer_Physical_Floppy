@@ -210,11 +210,6 @@ For 10 or 11 sectors, copy `gap3` and `rate` from `atarist.800` or
 faster write. Don't skip the extra cylinders: cracked games often keep part of
 the game there, outside the files.
 
-Copy protected games are a different story: write them from an IPF or SCP
-image instead (`gw write game.ipf`, or `.scp`), and read them in flux mode.
-Some protections use "weak bits" that a Greaseweazle can't write, so a few
-games only work from the original disk.
-
 Two tips:
 
 - **Use a clean floppy, or one you've formatted.** The Greaseweazle only
