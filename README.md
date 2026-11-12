@@ -54,6 +54,11 @@ spinning on a MiSTer made me want the same thing for floppies. Thank you!
 Disk images keep working exactly as before: you only get the real drive when
 you pick the special file described below.
 
+On the Atari ST this Main also reads STX, SCP and IPF images, like the
+official one. IPF images need `libcapsimg.so` in `/media/fat/linux/` (the same
+file the Minimig core uses for IPF): without it they don't mount and the menu
+stays on "no disk". STX and SCP don't need it.
+
 ## What you need
 
 - A MiSTer, of course
