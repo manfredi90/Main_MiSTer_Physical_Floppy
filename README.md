@@ -27,7 +27,8 @@ spinning on a MiSTer made me want the same thing for floppies. Thank you!
 | Amiga (Minimig), "AmigaDOS" mode | – | ✔ | ✔ |
 | MacPlus | – | ✔ | – (read only) |
 | MacLC, MacSE30, MacIIcx | – | ✔ | – (read only) |
-| Atari ST | – | ✔ | – (read only) |
+| Atari ST, "flux" mode | – | ✔ | – (read only) |
+| Atari ST, sector mode | – | ✔ | ✔ |
 
 - **PC cores**: 720K and 1.44MB disks (and 360K/1.2MB ones with a 5.25"
   drive on the Greaseweazle, not tested yet). The drive only reads what the PC
@@ -41,12 +42,14 @@ spinning on a MiSTer made me want the same thing for floppies. Thank you!
 - **Mac**: 400K and 800K Mac disks. The MacLC, MacSE30 and MacIIcx also take
   720K and 1.44MB disks. Mac disks are read only on purpose: they are getting
   rare, and writing them with a PC drive doesn't work with every drive.
-- **Atari ST**: ST disks of 9, 10 or 11 sectors per track, single or double
-  sided, including the ones with a few extra tracks (81 to 83 cylinders) that
-  many games and menu disks use. Read only for now. **Copy protected
-  originals don't work**: the ST core only knows plain disk images (.st), so
-  the protection can't reach it. Unprotected disks, cracked "backup copies",
-  menu disks, demos and your own disks are fine.
+- **Atari ST**, two ways to use it, like the Amiga:
+  - **Flux mode** hands the raw disk to the core, which reads it the way the
+    ST's floppy controller would, so *copy protected games work too*. Read
+    only.
+  - **Sector mode** works with normal ST disks of 9, 10 or 11 sectors per
+    track, single or double sided, including the ones with a few extra tracks
+    (81 to 83 cylinders) that many games and menu disks use, and lets you
+    save to them.
 
 Disk images keep working exactly as before: you only get the real drive when
 you pick the special file described below.
@@ -65,6 +68,10 @@ you pick the special file described below.
 - For the **MacPlus**: an unstable build from September 17, 2026 or newer. The
   MacLC, MacSE30 and MacIIcx releases from late September / October 2026 are
   fine.
+- For the Atari ST **flux mode**: an AtariST core from November 10, 2026 or
+  newer, the first one that reads copy protected disks (STX, SCP and IPF
+  images). Until it comes out officially, use the one attached to the
+  release. Sector mode works with any AtariST core.
 
 ## Installation
 
@@ -129,7 +136,8 @@ image, means "use the real drive":
 | Amiga, flux mode | `_GREASEWEAZLE_.adf` | DF0: (or another drive) |
 | Amiga, AmigaDOS mode | `_GREASEWEAZLE_DOS_.adf` | DF0: (or another drive) |
 | Mac | `_GREASEWEAZLE_.dsk` | the floppy drive |
-| Atari ST | `_GREASEWEAZLE_.st` | Floppy A: or B: in the ST menu |
+| Atari ST, flux mode | `_GREASEWEAZLE_.scp` | Floppy A: or B: in the ST menu |
+| Atari ST, sector mode | `_GREASEWEAZLE_.st` | Floppy A: or B: in the ST menu |
 
 After that, use the drive just like on the real computer: swap disks whenever
 you want and the core notices.
@@ -145,8 +153,12 @@ A few things worth knowing:
 - **Wait for the drive to stop before taking a disk out**, especially right
   after saving something: changes reach the disk a moment after the computer
   saves them.
-- **Atari ST disks show up write-protected**, since writing them isn't
-  supported yet. A game that wants to save to its disk will complain.
+- **Atari ST, flux mode**: the disk shows up write-protected, so a game
+  that wants to save to it will complain (use sector mode for that). Tracks
+  are read as the ST asks for them, so loading is a bit slower than from an
+  image. Some games want a 50 Hz (European) TOS, and older ones TOS 1.02 or
+  1.04 with 512K or 1MB, exactly as on a real ST.
+- **Atari ST, sector mode**: formatting a disk from the ST isn't supported.
 - **Write protect your precious disks** (slide the little tab). Windows, for
   example, likes to write to a floppy even when you're only copying files
   from it.
@@ -197,6 +209,11 @@ For 10 or 11 sectors, copy `gap3` and `rate` from `atarist.800` or
 `atarist.880`: 11 sectors only fit on a track with tiny gaps and a slightly
 faster write. Don't skip the extra cylinders: cracked games often keep part of
 the game there, outside the files.
+
+Copy protected games are a different story: write them from an IPF or SCP
+image instead (`gw write game.ipf`, or `.scp`), and read them in flux mode.
+Some protections use "weak bits" that a Greaseweazle can't write, so a few
+games only work from the original disk.
 
 Two tips:
 
@@ -277,8 +294,9 @@ in Zaparoo instead of relying on auto detection.)
   example *Desert Dream* by Kefrens). They work in AmigaDOS mode, or from an
   ADF.
 - **Mac disks** are read only, and slow to load (see above).
-- **Atari ST**: copy protected originals don't work, only unprotected disks
-  and backup copies (see above).
+- **Atari ST**: flux mode was tested with protected disks written from IPF
+  images (Turrican II, Crack Down, North & South, Ghouls 'n Ghosts), not with
+  original disks yet.
 - **Not every PC drive reads Mac disks well.** Mac disks are recorded in a
   way PC drives weren't made for, and some drives struggle with the inner
   tracks (cylinders 48 to 79): the log then shows lots of bad sectors there,
