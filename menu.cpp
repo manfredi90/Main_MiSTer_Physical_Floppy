@@ -5527,7 +5527,7 @@ void HandleUI(void)
 		break;
 
 	case MENU_ST_SYSTEM1:
-		menumask = 0x1fffb;
+		menumask = 0x3fffb;
 		OsdSetTitle("Config", 0);
 		helptext_idx = 0;
 
@@ -5588,27 +5588,31 @@ void HandleUI(void)
 			else                                        strcat(s, "Full");
 			MenuWrite(m++, s, menusub == 11);
 
+			strcpy(s, " Border:     ");
+			strcat(s, (tos_get_extctrl() & 0x2000) ? "No" : "Yes");
+			MenuWrite(m++, s, menusub == 12);
+
 			strcpy(s, " Scale:      ");
 			strcat(s, config_scale[(tos_get_extctrl() >> 11) & 3]);
-			MenuWrite(m++, s, menusub == 12);
+			MenuWrite(m++, s, menusub == 13);
 
 			strcpy(s, " Scanlines:  ");
 			strcat(s, tos_scanlines[(tos_system_ctrl() >> 20) & 3]);
-			MenuWrite(m++, s, menusub == 13);
+			MenuWrite(m++, s, menusub == 14);
 			MenuWrite(m++);
 
 			strcpy(s, " Dongle:     ");
 			if (tos_system_ctrl() & TOS_CONTROL_DONGLE) strcat(s, "Cubase");
 			else                                        strcat(s, "None");
-			MenuWrite(m++, s, menusub == 14);
+			MenuWrite(m++, s, menusub == 15);
 			MenuWrite(m++);
 
 			strcpy(s, " YM-Audio:   ");
 			strcat(s, tos_stereo[(tos_system_ctrl() & TOS_CONTROL_STEREO) ? 1 : 0]);
-			MenuWrite(m++, s, menusub == 15);
+			MenuWrite(m++, s, menusub == 16);
 			MenuWrite(m++);
 
-			MenuWrite(m++, STD_BACK, menusub == 16);
+			MenuWrite(m++, STD_BACK, menusub == 17);
 
 			if (!adjvisible) break;
 			firstmenu += adjvisible;
@@ -5732,6 +5736,11 @@ void HandleUI(void)
 				break;
 
 			case 12:
+				tos_set_extctrl(tos_get_extctrl() ^ 0x2000);
+				menustate = MENU_ST_SYSTEM1;
+				break;
+
+			case 13:
 				{
 					int mode = ((tos_get_extctrl() >> 11) + (minus ? -1 : 1)) & 3;
 					tos_set_extctrl((tos_get_extctrl() & ~0x1800) | (mode << 11));
@@ -5739,7 +5748,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 13:
+			case 14:
 				{
 					// next scanline state
 					int scan = ((tos_system_ctrl() >> 20) + (minus ? -1 : 1)) & 3;
@@ -5748,18 +5757,18 @@ void HandleUI(void)
 				}
 				break;
 
-			case 14:
+			case 15:
 				tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_DONGLE);
 				menustate = MENU_ST_SYSTEM1;
 				break;
 
-			case 15:
+			case 16:
 				tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_STEREO);
 				menustate = MENU_ST_SYSTEM1;
 				break;
 
 
-			case 16:
+			case 17:
 				menustate = MENU_ST_MAIN1;
 				menusub = 5;
 				if (need_reset)
