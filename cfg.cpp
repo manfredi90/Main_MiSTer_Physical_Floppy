@@ -526,53 +526,52 @@ static constexpr int CFG_ERRORS_STRLEN = 128;
 static char cfg_errors[CFG_ERRORS_MAX][CFG_ERRORS_STRLEN];
 static int cfg_error_count = 0;
 
-const char* cfg_get_name(uint8_t alt)
+static char cfg_alt_names[CFG_ALT_MAX][64] = {};
+static int cfg_alt_num = 0;
+
+// MiSTer_*.ini files in the root, sorted alphabetically (case-insensitive).
+// Only the first CFG_ALT_MAX of them are kept.
+static void cfg_scan_names()
 {
 	static int done = 0;
-	static char names[3][64] = {};
-	static char name[64];
+	if (done) return;
+	done = 1;
 
-	if (!done)
+	DIR *d = opendir(getRootDir());
+	if (!d)
 	{
-		done = 1;
-		DIR *d = opendir(getRootDir());
-		if (!d)
-		{
-			printf("Couldn't open dir: %s\n", getRootDir());
-		}
-		else
-		{
-			struct dirent *de;
-			int i = 0;
-			while ((de = readdir(d)) && i < 3)
-			{
-				int len = strlen(de->d_name);
-				if (!strncasecmp(de->d_name, "MiSTer_", 7) && !strcasecmp(de->d_name + len - 4, ".ini"))
-				{
-					snprintf(names[i], sizeof(names[0]), "%s", de->d_name);
-					i++;
-				}
-			}
-			closedir(d);
-		}
-
-		for (int i = 1; i < 3; i++)
-		{
-			for (int j = 1; j < 3; j++)
-			{
-				if ((!names[j - 1][0] && names[j][0]) || (names[j - 1][0] && names[j][0] && strcasecmp(names[j - 1], names[j]) > 0))
-				{
-					strcpy(name, names[j - 1]);
-					strcpy(names[j - 1], names[j]);
-					strcpy(names[j], name);
-				}
-			}
-		}
+		printf("Couldn't open dir: %s\n", getRootDir());
+		return;
 	}
 
-	strcpy(name, "MiSTer.ini");
-	if (alt && alt < 4) strcpy(name, names[alt-1]);
-	return name;
+	struct dirent *de;
+	while ((de = readdir(d)))
+	{
+		int len = strlen(de->d_name);
+		if (strncasecmp(de->d_name, "MiSTer_", 7) || len < 4 || strcasecmp(de->d_name + len - 4, ".ini")) continue;
+
+		int pos = cfg_alt_num;
+		while (pos > 0 && strcasecmp(cfg_alt_names[pos - 1], de->d_name) > 0) pos--;
+		if (pos >= CFG_ALT_MAX) continue;
+
+		int last = (cfg_alt_num < CFG_ALT_MAX) ? cfg_alt_num++ : CFG_ALT_MAX - 1;
+		for (int i = last; i > pos; i--) strcpy(cfg_alt_names[i], cfg_alt_names[i - 1]);
+		snprintf(cfg_alt_names[pos], sizeof(cfg_alt_names[0]), "%s", de->d_name);
+	}
+	closedir(d);
+}
+
+int cfg_get_count()
+{
+	cfg_scan_names();
+	return cfg_alt_num + 1;
+}
+
+const char* cfg_get_name(uint8_t alt)
+{
+	cfg_scan_names();
+	if (!alt) return "MiSTer.ini";
+	return (alt <= cfg_alt_num) ? cfg_alt_names[alt - 1] : "";
 }
 
 const char* cfg_get_label(uint8_t alt)
