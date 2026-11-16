@@ -67,6 +67,8 @@ char* flist_GetPrevNext(const char* base_path, const char* file, const char* ext
 #define SCANF_PREV_CHAR -5 // find previous letter/number
 
 // options flags
+#define SCRIPT_SECTION_DIR "_Script" // scripts listed as a section of the core browser
+
 #define SCANO_DIR        0b000000001 // include subdirectories
 #define SCANO_UMOUNT     0b000000010 // allow backspace key
 #define SCANO_CORES      0b000000100 // only include subdirectories with prefix '_'

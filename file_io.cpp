@@ -1789,6 +1789,11 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 						{
 							found = !strcasecmp(de->d_name + strlen(de->d_name) - 4, ".iso");
 						}
+						if (!found && (options & SCANO_CORES) && !strcasecmp(path, SCRIPT_SECTION_DIR))
+						{
+							int len = strlen(de->d_name);
+							found = (len > 3) && !strcasecmp(de->d_name + len - 3, ".sh");
+						}
 
 						char *fext = strrchr(de->d_name, '.');
 						if (fext) fext++;

@@ -577,6 +577,68 @@ static int select_ini = 0;
 static int ini_sel = 0;
 static int ini_first = 0;
 
+static int script_from_cores = 0;
+static uint32_t script_cores_cancel = 0;
+static char script_core_path[1024] = {};
+
+static int scripts_confirmed(uint8_t *cid)
+{
+	uint8_t confirm[32] = {};
+	int fd = open("/sys/block/mmcblk0/device/cid", O_RDONLY);
+	if (fd < 0) return 0;
+
+	int ret = read(fd, cid, 32);
+	close(fd);
+	return (ret == 32) && FileLoadConfig("script_confirm", confirm, 32) && !memcmp(cid, confirm, 32);
+}
+
+static const char *script_section_entry(const char *name)
+{
+	static char path[1024];
+	snprintf(path, sizeof(path), "%s/%s", SCRIPT_SECTION_DIR, name);
+	return path;
+}
+
+static int script_in_section(const char *name)
+{
+	return FileExists(script_section_entry(name));
+}
+
+// add/remove a script to/from the Script section of the core browser
+static void script_toggle_section(const char *dir, const char *name)
+{
+	const char *entry = script_section_entry(name);
+	if (FileExists(entry))
+	{
+		FileDelete(entry);
+		return;
+	}
+
+	static char full_dir[1024], full_src[1024], txt[4096];
+	snprintf(full_dir, sizeof(full_dir), "%s", getFullPath(dir));
+	snprintf(full_src, sizeof(full_src), "%s/%s", full_dir, name);
+	snprintf(txt, sizeof(txt), "#!/bin/bash\ncd \"%s\" || exit 1\nexec \"%s\" \"$@\"\n", full_dir, full_src);
+
+	FileCreatePath(SCRIPT_SECTION_DIR);
+	FileSave(script_section_entry(name), txt, strlen(txt));
+}
+
+static int script_is_section_file(const char *path)
+{
+	int dlen = strlen(SCRIPT_SECTION_DIR);
+	int len = strlen(path);
+	return !strncasecmp(path, SCRIPT_SECTION_DIR, dlen) && path[dlen] == '/' && len > 3 && !strcasecmp(path + len - 3, ".sh");
+}
+
+static void script_return_to_cores()
+{
+	script_from_cores = 0;
+	SelectFile("", 0, SCANO_CORES, MENU_CORE_FILE_SELECTED1, script_cores_cancel);
+	strcpy(selPath, script_core_path);
+	ScanDirectory(selPath, SCANF_INIT, fs_pFileExt, fs_Options);
+	AdjustDirectory(selPath);
+}
+
 void SelectINI()
 {
 	select_ini = 1;
@@ -6141,6 +6203,16 @@ void HandleUI(void)
 			helptext_idx = 0;
 		}
 
+		if (recent && fs_MenuSelect == MENU_SCRIPTS_FB)
+		{
+			recent = false;
+			if (flist_nDirEntries() && flist_SelectedItem()->de.d_type == DT_REG)
+			{
+				script_toggle_section(selPath, flist_SelectedItem()->de.d_name);
+				PrintDirectory(1);
+			}
+		}
+
 		if (recent && recent_init((fs_RecentIdx >= 0) ? fs_RecentIdx : (fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index))
 		{
 			menustate = MENU_RECENT1;
@@ -8086,23 +8158,8 @@ void HandleUI(void)
 
 			case MENU_SYSTEM_SUB_SCRIPTS:
 				{
-					uint8_t confirm[32] = {};
-					int match = 0;
-					int fd = open("/sys/block/mmcblk0/device/cid", O_RDONLY);
-					if (fd >= 0)
-					{
-						int ret = read(fd, card_cid, 32);
-						close(fd);
-						if (ret == 32)
-						{
-							if (FileLoadConfig("script_confirm", confirm, 32))
-							{
-								match = !memcmp(card_cid, confirm, 32);
-							}
-						}
-					}
-
-					if (match) SelectFile(Selected_F[0], "SH", SCANO_DIR, MENU_SCRIPTS_FB, MENU_SYSTEM1);
+					script_from_cores = 0;
+					if (scripts_confirmed(card_cid)) SelectFile(Selected_F[0], "SH", SCANO_DIR, MENU_SCRIPTS_FB, MENU_SYSTEM1);
 					else
 					{
 						menustate = MENU_SCRIPTS_PRE;
@@ -8265,30 +8322,24 @@ void HandleUI(void)
 		break;
 
 	case MENU_SCRIPTS_PRE1:
-		if (menu) menustate = MENU_SYSTEM1;
+		if (menu || (select && !menusub))
+		{
+			if (script_from_cores) script_return_to_cores();
+			else menustate = MENU_SYSTEM1;
+		}
 		else if (select)
 		{
-			switch (menusub)
-			{
-			case 0:
-				menustate = MENU_SYSTEM1;
-				break;
+			if (menusub == 2) FileSaveConfig("script_confirm", card_cid, 32);
 
-			case 2:
-				FileSaveConfig("script_confirm", card_cid, 32);
-				// fall through
-
-			case 1:
-				SelectFile(Selected_F[0], "SH", SCANO_DIR, MENU_SCRIPTS_FB, MENU_SYSTEM1);
-				break;
-			}
+			if (script_from_cores) menustate = is_menu() ? MENU_SCRIPTS_FB : MENU_SCRIPTS;
+			else SelectFile(Selected_F[0], "SH", SCANO_DIR, MENU_SCRIPTS_FB, MENU_SYSTEM1);
 		}
 		break;
 
 	case MENU_SCRIPTS_FB:
 		if (cfg.fb_terminal)
 		{
-			memcpy(Selected_F[0], selPath, sizeof(Selected_F[0]));
+			if (!script_from_cores) memcpy(Selected_F[0], selPath, sizeof(Selected_F[0]));
 			static char cmd[1024 * 2];
 			const char *path = getFullPath(selPath);
 			menustate = MENU_SCRIPTS_FB2;
@@ -8328,10 +8379,14 @@ void HandleUI(void)
 			{
 				video_menu_bg(user_io_status_get("[3:1]"));
 				video_fb_enable(0);
-				menustate = MENU_SYSTEM1;
-				menusub = MENU_SYSTEM_SUB_SCRIPTS;
 				OsdClear();
 				OsdEnable(DISABLE_KEYBOARD);
+				if (script_from_cores) script_return_to_cores();
+				else
+				{
+					menustate = MENU_SYSTEM1;
+					menusub = MENU_SYSTEM_SUB_SCRIPTS;
+				}
 			}
 		}
 		break;
@@ -8457,6 +8512,7 @@ void HandleUI(void)
 					bt_pairing = false;
 					menustate = MENU_NONE1;
 				}
+				else if (script_from_cores) script_return_to_cores();
 				else
 				{
 					menustate = MENU_SYSTEM1;
@@ -8524,6 +8580,21 @@ void HandleUI(void)
 		break;
 
 	case MENU_CORE_FILE_SELECTED1:
+		if (script_is_section_file(selPath))
+		{
+			// script from the Script section: run it like the Scripts menu does
+			script_from_cores = 1;
+			script_cores_cancel = fs_MenuCancel;
+			snprintf(script_core_path, sizeof(script_core_path), "%s", selPath);
+			if (scripts_confirmed(card_cid)) menustate = is_menu() ? MENU_SCRIPTS_FB : MENU_SCRIPTS;
+			else
+			{
+				menustate = MENU_SCRIPTS_PRE;
+				menusub = 0;
+			}
+			break;
+		}
+
 		recent_update(SelectedDir, selPath, SelectedLabel, -1);
 		menustate = MENU_NONE1;
 		memcpy(Selected_tmp, selPath, sizeof(Selected_tmp));
@@ -9155,6 +9226,8 @@ void PrintDirectory(int expand)
 				}
 				len2 = 0;
 			}
+
+			if (fs_MenuSelect == MENU_SCRIPTS_FB && flist_DirItem(k)->de.d_type == DT_REG && script_in_section(flist_DirItem(k)->de.d_name)) s[0] = 0x1a;
 
 			if (!i && k) leftchar = 17;
 			if (i && k < flist_nDirEntries() - 1) leftchar = 16;
