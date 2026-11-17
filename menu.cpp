@@ -1566,6 +1566,35 @@ void HandleUI(void)
 		if (c == KEY_ENTER || c == KEY_KPENTER) finish = true;
 		if (get_map_paused() && (c == KEY_F7 || c == KEY_F9 || c == KEY_F10 || c == KEY_F11)) c = 0;
 
+		// Esc + arrow switches ini, like Back + dpad on a gamepad
+		static int esc_held = 0, esc_combo = 0;
+		if (c == KEY_ESC)
+		{
+			if (!esc_held) esc_combo = 0;
+			esc_held = 1;
+		}
+		else if (c == (KEY_ESC | UPSTROKE))
+		{
+			esc_held = 0;
+			if (esc_combo) c = 0;
+			esc_combo = 0;
+		}
+		else if (esc_held && menu_allow_cfg_switch())
+		{
+			int ini = -1;
+			if (c == KEY_RIGHT) ini = 0;
+			else if (c == KEY_LEFT) ini = 1;
+			else if (c == KEY_UP) ini = 2;
+			else if (c == KEY_DOWN) ini = 3;
+
+			if (ini >= 0)
+			{
+				c = 0;
+				esc_combo = 1;
+				user_io_set_ini(ini);
+			}
+		}
+
 		switch (c)
 		{
 		case KEY_F12:
