@@ -610,13 +610,10 @@ const char* cfg_get_label(uint8_t alt)
 
 	static char label[6];
 	snprintf(label, sizeof(label), "%s", sname);
-	if (!strchr(name, '/'))
-	{
-		if (!strcasecmp(label, "alt"))   return "Alt1";
-		if (!strcasecmp(label, "alt_1")) return "Alt1";
-		if (!strcasecmp(label, "alt_2")) return "Alt2";
-		if (!strcasecmp(label, "alt_3")) return "Alt3";
-	}
+	if (!strcasecmp(label, "alt"))   return "Alt1";
+	if (!strcasecmp(label, "alt_1")) return "Alt1";
+	if (!strcasecmp(label, "alt_2")) return "Alt2";
+	if (!strcasecmp(label, "alt_3")) return "Alt3";
 
 	for (int i = strlen(label); i < 4; i++) label[i] = ' ';
 	label[4] = 0;
