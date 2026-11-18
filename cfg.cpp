@@ -526,39 +526,49 @@ static constexpr int CFG_ERRORS_STRLEN = 128;
 static char cfg_errors[CFG_ERRORS_MAX][CFG_ERRORS_STRLEN];
 static int cfg_error_count = 0;
 
-static char cfg_alt_names[CFG_ALT_MAX][64] = {};
+static char cfg_alt_names[CFG_ALT_MAX][128] = {};
 static int cfg_alt_num = 0;
 
-// MiSTer_*.ini files in the root, sorted alphabetically (case-insensitive).
-// Only the first CFG_ALT_MAX of them are kept.
+// Adds the ini files of a folder, sorted alphabetically (case-insensitive),
+// keeping at most max of them.
+static void cfg_scan_dir(const char *dir, int root, int max)
+{
+	DIR *d = opendir(root ? getRootDir() : getFullPath(dir));
+	if (!d) return;
+
+	int base = cfg_alt_num, num = 0;
+	struct dirent *de;
+	while ((de = readdir(d)))
+	{
+		int len = strlen(de->d_name);
+		if (de->d_name[0] == '.' || de->d_type == DT_DIR || len < 5 || strcasecmp(de->d_name + len - 4, ".ini")) continue;
+		if (root && strncasecmp(de->d_name, "MiSTer_", 7)) continue;
+
+		char name[sizeof(cfg_alt_names[0])];
+		if (snprintf(name, sizeof(name), "%s%s%s", root ? "" : dir, root ? "" : "/", de->d_name) >= (int)sizeof(name)) continue;
+
+		int pos = num;
+		while (pos > 0 && strcasecmp(cfg_alt_names[base + pos - 1], name) > 0) pos--;
+		if (pos >= max) continue;
+
+		int last = (num < max) ? num++ : max - 1;
+		for (int i = last; i > pos; i--) strcpy(cfg_alt_names[base + i], cfg_alt_names[base + i - 1]);
+		strcpy(cfg_alt_names[base + pos], name);
+	}
+	closedir(d);
+	cfg_alt_num = base + num;
+}
+
+// MiSTer.ini, then the first 3 MiSTer_*.ini of the root (the ones on the
+// shortcuts), then all the ini files of the INI folder.
 static void cfg_scan_names()
 {
 	static int done = 0;
 	if (done) return;
 	done = 1;
 
-	DIR *d = opendir(getRootDir());
-	if (!d)
-	{
-		printf("Couldn't open dir: %s\n", getRootDir());
-		return;
-	}
-
-	struct dirent *de;
-	while ((de = readdir(d)))
-	{
-		int len = strlen(de->d_name);
-		if (strncasecmp(de->d_name, "MiSTer_", 7) || len < 4 || strcasecmp(de->d_name + len - 4, ".ini")) continue;
-
-		int pos = cfg_alt_num;
-		while (pos > 0 && strcasecmp(cfg_alt_names[pos - 1], de->d_name) > 0) pos--;
-		if (pos >= CFG_ALT_MAX) continue;
-
-		int last = (cfg_alt_num < CFG_ALT_MAX) ? cfg_alt_num++ : CFG_ALT_MAX - 1;
-		for (int i = last; i > pos; i--) strcpy(cfg_alt_names[i], cfg_alt_names[i - 1]);
-		snprintf(cfg_alt_names[pos], sizeof(cfg_alt_names[0]), "%s", de->d_name);
-	}
-	closedir(d);
+	cfg_scan_dir("", 1, 3);
+	cfg_scan_dir(CFG_INI_DIR, 0, CFG_ALT_MAX - cfg_alt_num);
 }
 
 int cfg_get_count()
@@ -574,6 +584,20 @@ const char* cfg_get_name(uint8_t alt)
 	return (alt <= cfg_alt_num) ? cfg_alt_names[alt - 1] : "";
 }
 
+// file name without folder, "MiSTer" prefix and extension (e.g. "_HDMI" or "CRT")
+const char* cfg_get_short_name(uint8_t alt)
+{
+	static char name[128];
+	const char *p = cfg_get_name(alt);
+	const char *base = strrchr(p, '/');
+	base = base ? base + 1 : p;
+	if (!strncasecmp(base, "MiSTer", 6)) base += 6;
+	snprintf(name, sizeof(name), "%s", base);
+	char *ext = strrchr(name, '.');
+	if (ext) *ext = 0;
+	return name;
+}
+
 const char* cfg_get_label(uint8_t alt)
 {
 	if (!alt) return "Main";
@@ -581,16 +605,20 @@ const char* cfg_get_label(uint8_t alt)
 	const char *name = cfg_get_name(alt);
 	if (!name[0]) return " -- ";
 
-	static char label[6];
-	snprintf(label, sizeof(label), "%s", name + 7);
-	char *p = strrchr(label, '.');
-	if (p) *p = 0;
-	if (!strcasecmp(label, "alt"))   return "Alt1";
-	if (!strcasecmp(label, "alt_1")) return "Alt1";
-	if (!strcasecmp(label, "alt_2")) return "Alt2";
-	if (!strcasecmp(label, "alt_3")) return "Alt3";
+	const char *sname = cfg_get_short_name(alt);
+	if (sname[0] == '_') sname++;
 
-	for (int i = 0; i < 4; i++) if (!label[i]) label[i] = ' ';
+	static char label[6];
+	snprintf(label, sizeof(label), "%s", sname);
+	if (!strchr(name, '/'))
+	{
+		if (!strcasecmp(label, "alt"))   return "Alt1";
+		if (!strcasecmp(label, "alt_1")) return "Alt1";
+		if (!strcasecmp(label, "alt_2")) return "Alt2";
+		if (!strcasecmp(label, "alt_3")) return "Alt3";
+	}
+
+	for (int i = strlen(label); i < 4; i++) label[i] = ' ';
 	label[4] = 0;
 	return label;
 }
