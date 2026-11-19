@@ -297,21 +297,9 @@ these extras are gone (an ini past the 4th falls back to `MiSTer.ini`).
 
 ## Zaparoo users
 
-If you use [Zaparoo](https://zaparoo.org), its NFC reader detection pokes at
-every USB serial port it finds, and that includes the Greaseweazle. The two
-end up fighting over it and the floppy stops working.
-
-Until Zaparoo learns to leave the Greaseweazle alone, here's a workaround if
-you **don't use a PN532 NFC reader**: open `zaparoo/config.toml` on your SD
-card and add this at the end:
-
-```toml
-[readers.drivers.pn532]
-auto_detect = false
-```
-
-Then restart the MiSTer. (If you do use a PN532 reader, configure it by hand
-in Zaparoo instead of relying on auto detection.)
+Use [Zaparoo](https://zaparoo.org) 2.21.0 or newer: it leaves the
+Greaseweazle alone. Older versions probe it as if it were an NFC reader and
+the floppy stops working, so update Zaparoo if you have one of those.
 
 ## Known issues
 
