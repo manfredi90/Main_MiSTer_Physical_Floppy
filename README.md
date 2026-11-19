@@ -282,8 +282,7 @@ main=MiSTer_Physical-Floppy
   `MiSTer_*.ini` (the first 3 in alphabetical order): those are the ones on
   the shortcuts and on the Select INI screen at boot. Put any other ini in an
   `INI` folder in the root of the SD card: the Config line in Misc. Options
-  scrolls through all of them. Files can be moved between the root and `INI`
-  and show up with the same name.
+  scrolls through all of them.
 - **Switch ini from the keyboard.** With the OSD open, hold Esc and press an
   arrow, like Back + dpad on a gamepad: right is `MiSTer.ini`, left/up/down
   are the 3 alternative ones.
