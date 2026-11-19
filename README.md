@@ -267,6 +267,35 @@ These go in the `[MiSTer]` section of your ini, or in a core's section:
 | `PFLOPPY_PRELOAD=1` | PC cores: read the whole disk in the background as soon as it goes in. Can help when a program gives up because the drive is too slow. Off by default, so the drive only reads what's needed, like a real one. |
 | `PFLOPPY_LOG=1` | Write a log of what the drive does to `logs/pfloppy.log` on the SD card (see below). Off by default. |
 
+## Extras when you use it for the menu too
+
+This Main also has a few small improvements that have nothing to do with
+floppies. You get them when the menu itself runs on this Main: add this to
+your ini files, together with the lines above.
+
+```ini
+[Menu]
+main=MiSTer_Physical-Floppy
+```
+
+- **More than 4 ini files.** The root still holds `MiSTer.ini` plus up to 3
+  `MiSTer_*.ini` (the first 3 in alphabetical order): those are the ones on
+  the shortcuts and on the Select INI screen at boot. Put any other ini in an
+  `INI` folder in the root of the SD card: the Config line in Misc. Options
+  scrolls through all of them. Files can be moved between the root and `INI`
+  and show up with the same name.
+- **Switch ini from the keyboard.** With the OSD open, hold Esc and press an
+  arrow, like Back + dpad on a gamepad: right is `MiSTer.ini`, left/up/down
+  are the 3 alternative ones.
+- **Scripts in the core list.** In System → Scripts, press Select on the
+  gamepad (or the key left of 1 on the keyboard) to add or remove the
+  highlighted script: it then shows up in a Script section of the core list,
+  so you can start it from there.
+
+Every ini you switch to, the ones in `INI` included, needs the `[Menu]` lines
+above. If one doesn't have them, the menu restarts with the normal Main and
+these extras are gone (an ini past the 4th falls back to `MiSTer.ini`).
+
 ## Zaparoo users
 
 If you use [Zaparoo](https://zaparoo.org), its NFC reader detection pokes at
