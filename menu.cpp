@@ -4502,7 +4502,7 @@ void HandleUI(void)
 			menustate = MENU_NONE1;
 			break;
 		}
-		else if (menusub == 0 && (right || select))
+		else if (menusub == 0 && select)
 		{
 			ini_list_init();
 			menustate = MENU_INI_LIST1;
