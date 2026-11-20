@@ -559,8 +559,8 @@ static void cfg_scan_dir(const char *dir, int root, int max)
 	cfg_alt_num = base + num;
 }
 
-// MiSTer.ini, then the first 3 MiSTer_*.ini of the root (the ones on the
-// shortcuts), then all the ini files of the INI folder.
+// 0: MiSTer.ini, 1-3: the first 3 MiSTer_*.ini of the root (the ones on the
+// shortcuts, empty if missing), 4 and up: the ini files of the INI folder.
 static void cfg_scan_names()
 {
 	static int done = 0;
@@ -568,6 +568,7 @@ static void cfg_scan_names()
 	done = 1;
 
 	cfg_scan_dir("", 1, 3);
+	cfg_alt_num = 3;
 	cfg_scan_dir(CFG_INI_DIR, 0, CFG_ALT_MAX - cfg_alt_num);
 }
 
