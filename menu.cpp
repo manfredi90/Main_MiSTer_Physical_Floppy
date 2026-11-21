@@ -582,7 +582,6 @@ static int ini_list_num = 0;
 static int ini_list_sel = 0;
 static int ini_list_first = 0;
 
-// name shown for an ini: file name without folder, MiSTer_ prefix and extension
 static const char *ini_display_name(int alt)
 {
 	if (!alt) return "Main";

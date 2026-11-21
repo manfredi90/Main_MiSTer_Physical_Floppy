@@ -529,8 +529,6 @@ static int cfg_error_count = 0;
 static char cfg_alt_names[CFG_ALT_MAX][128] = {};
 static int cfg_alt_num = 0;
 
-// Adds the ini files of a folder, sorted alphabetically (case-insensitive),
-// keeping at most max of them.
 static void cfg_scan_dir(const char *dir, int root, int max)
 {
 	DIR *d = opendir(root ? getRootDir() : getFullPath(dir));
@@ -559,8 +557,6 @@ static void cfg_scan_dir(const char *dir, int root, int max)
 	cfg_alt_num = base + num;
 }
 
-// 0: MiSTer.ini, 1-3: the first 3 MiSTer_*.ini of the root (the ones on the
-// shortcuts, empty if missing), 4 and up: the ini files of the INI folder.
 static void cfg_scan_names()
 {
 	static int done = 0;
@@ -585,7 +581,6 @@ const char* cfg_get_name(uint8_t alt)
 	return (alt <= cfg_alt_num) ? cfg_alt_names[alt - 1] : "";
 }
 
-// file name without folder, "MiSTer" prefix and extension (e.g. "_HDMI" or "CRT")
 const char* cfg_get_short_name(uint8_t alt)
 {
 	static char name[128];
